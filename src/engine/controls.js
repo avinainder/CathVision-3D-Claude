@@ -8,8 +8,8 @@ const PHI_MAX = Math.PI - 0.1;
 export function createCameraController(camera, domElement) {
   const state = {
     radius: 30,
-    theta: 0,        // azimuth (horizontal angle)
-    phi: Math.PI / 3, // polar (vertical angle)
+    theta: 0,            // azimuth (horizontal angle)
+    phi: Math.PI / 2,    // polar (vertical angle) — PI/2 = horizon = AP view
     target: new THREE.Vector3(0, 0, 0),
     isDragging: false,
     isPanning: false,

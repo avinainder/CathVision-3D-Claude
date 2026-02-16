@@ -25,7 +25,7 @@ export function createScene() {
 
 export function createCamera(aspect) {
   const camera = new THREE.PerspectiveCamera(50, aspect, 0.1, 500);
-  camera.position.set(0, 5, 30);
+  camera.position.set(0, 0, 30);
   camera.lookAt(0, 0, 0);
   return camera;
 }

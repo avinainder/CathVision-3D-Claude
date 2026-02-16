@@ -2,15 +2,16 @@ export default function AngleCompass({ angles }) {
   if (!angles) return null;
 
   // Map angles to position on 80x80 grid
-  // Horizontal: -90 to 90 (RAO left, LAO right)
-  // Vertical: -90 to 90 (CAU bottom, CRA top)
-  const hRaw = angles.horizontal.raw; // positive = LAO
+  // Horizontal: RAO left (R label), LAO right (L label)
+  // Vertical: CRA top (C label), CAU bottom (U label)
+  const hRaw = angles.horizontal.raw; // positive = RAO
   const vRaw = angles.vertical.raw;   // positive = CRA
 
-  const cx = 40 + (hRaw / 90) * 30;
+  // Negate hRaw so RAO (positive) maps left toward R label
+  const cx = 40 - (hRaw / 90) * 30;
   const cy = 40 - (vRaw / 90) * 30;
 
-  const hColor = hRaw >= 0 ? 'var(--color-lao)' : 'var(--color-rao)';
+  const hColor = hRaw >= 0 ? 'var(--color-rao)' : 'var(--color-lao)';
   const vColor = vRaw >= 0 ? 'var(--color-cra)' : 'var(--color-cau)';
 
   return (

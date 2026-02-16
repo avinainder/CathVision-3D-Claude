@@ -103,7 +103,7 @@ export default function App() {
       // Reset camera
       const ctrl = engine.controller;
       ctrl.resetTarget();
-      ctrl.animateTo(0, Math.PI / 3, 30);
+      ctrl.animateTo(0, Math.PI / 2, 30);
     };
     reader.readAsArrayBuffer(file);
   }, [activeColor, opacity, wireframe]);
