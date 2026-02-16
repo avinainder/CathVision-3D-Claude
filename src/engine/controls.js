@@ -88,8 +88,9 @@ export function createCameraController(camera, domElement) {
     if (state.isPanning) {
       pan(dx, dy);
     } else {
-      // C-arm convention: drag left → LAO (theta decreases), drag up → CRA (phi decreases)
-      state.theta += dx * 0.005;
+      // Horizontal: standard orbit (theta -= dx) so drag-right → RAO
+      // Vertical: phi += dy so drag-up (dy<0) → phi decreases → cam above → CRA
+      state.theta -= dx * 0.005;
       state.phi = Math.max(PHI_MIN, Math.min(PHI_MAX, state.phi + dy * 0.005));
       updateCamera();
     }
@@ -147,8 +148,8 @@ export function createCameraController(camera, domElement) {
       const dx = e.touches[0].clientX - state.lastMouse.x;
       const dy = e.touches[0].clientY - state.lastMouse.y;
       state.lastMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-      // C-arm convention: drag left → LAO, drag up → CRA
-      state.theta += dx * 0.005;
+      // Horizontal: standard orbit (theta -= dx), Vertical: phi += dy (drag-up → CRA)
+      state.theta -= dx * 0.005;
       state.phi = Math.max(PHI_MIN, Math.min(PHI_MAX, state.phi + dy * 0.005));
       updateCamera();
     } else if (e.touches.length === 2) {

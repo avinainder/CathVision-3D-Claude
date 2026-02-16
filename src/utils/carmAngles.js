@@ -1,45 +1,73 @@
 const RAD_TO_DEG = 180 / Math.PI;
+const DEG_TO_RAD = Math.PI / 180;
 
+/**
+ * Compute C-arm gantry angles from camera position, using the same convention
+ * as 3D Slicer's positionerAngleFromViewNormal().
+ *
+ * After RAS→Three.js transform in the STL parser:
+ *   Three.js -X = patient Right, +X = patient Left
+ *   Three.js +Y = Superior,      -Y = Inferior
+ *   Three.js +Z = Anterior,      -Z = Posterior
+ *
+ * Reference: Koch14-OVA.pdf (Erlangen) and 3D Slicer source.
+ */
 export function computeAngles(cameraPosition, target) {
-  const dx = cameraPosition.x - target.x;
-  const dy = cameraPosition.y - target.y;
-  const dz = cameraPosition.z - target.z;
-  const distXZ = Math.sqrt(dx * dx + dz * dz);
+  const cx = cameraPosition.x - target.x;
+  const cy = cameraPosition.y - target.y;
+  const cz = cameraPosition.z - target.z;
+  const dist = Math.sqrt(cx * cx + cy * cy + cz * cz) || 1;
 
-  // Horizontal angle: atan2(x, z) gives the azimuth from +Z axis.
-  // Positive X = patient's right = RAO, Negative X = patient's left = LAO
-  const horizontalRad = Math.atan2(dx, dz);
-  const horizontalDeg = horizontalRad * RAD_TO_DEG;
+  // View direction (from camera toward target)
+  const vx = -cx / dist;
+  const vy = -cy / dist;
+  const vz = -cz / dist;
 
-  // Vertical angle: atan2(y, distXZ) gives the elevation from the XZ horizon.
-  // Positive Y = cranial (camera above), Negative Y = caudal (camera below)
-  const verticalRad = Math.atan2(dy, distXZ);
-  const verticalDeg = verticalRad * RAD_TO_DEG;
+  // Map to Slicer's nx/ny/nz (LPS-derived quantities):
+  //   nx = viewDir.x        (patient Left component)
+  //   ny = -viewDir.z       (patient Posterior component)
+  //   nz = viewDir.y        (patient Superior component)
+  const nx = vx;
+  const ny = -vz;
+  const nz = vy;
+
+  // Primary angle (RAO/LAO): atan(-nx / ny)
+  let primaryDeg;
+  if (Math.abs(ny) > 1e-6) {
+    primaryDeg = Math.atan(-nx / ny) * RAD_TO_DEG;
+  } else {
+    primaryDeg = nx >= 0 ? 90.0 : -90.0;
+  }
+
+  // Secondary angle (CRA/CAU): asin(nz)
+  const secondaryDeg = Math.asin(Math.max(-1, Math.min(1, nz))) * RAD_TO_DEG;
 
   return {
     horizontal: {
-      value: Math.abs(horizontalDeg),
-      label: horizontalDeg >= 0 ? 'RAO' : 'LAO',
-      fullName: horizontalDeg >= 0 ? 'Right Anterior Oblique' : 'Left Anterior Oblique',
-      raw: horizontalDeg,
+      value: Math.abs(primaryDeg),
+      label: primaryDeg < 0 ? 'RAO' : 'LAO',
+      fullName: primaryDeg < 0 ? 'Right Anterior Oblique' : 'Left Anterior Oblique',
+      raw: primaryDeg,
     },
     vertical: {
-      value: Math.abs(verticalDeg),
-      label: verticalDeg >= 0 ? 'CRA' : 'CAU',
-      fullName: verticalDeg >= 0 ? 'Cranial' : 'Caudal',
-      raw: verticalDeg,
+      value: Math.abs(secondaryDeg),
+      label: secondaryDeg < 0 ? 'CRA' : 'CAU',
+      fullName: secondaryDeg < 0 ? 'Cranial' : 'Caudal',
+      raw: secondaryDeg,
     },
   };
 }
 
-// Convert preset angles (in degrees) to spherical coords (theta, phi)
+/**
+ * Convert preset C-arm angles (degrees) to spherical camera coordinates.
+ *
+ * After RAS transform, RAO means camera at -X (patient Right), so
+ * theta (azimuth) must be negative for RAO.
+ * CRA means camera above (+Y), so phi (polar from +Y) must be < PI/2.
+ */
 export function presetToSpherical(raoDeg, craDeg) {
-  // raoDeg: positive = RAO, negative = LAO (convention for presets)
-  // craDeg: positive = CRA, negative = CAU
-  // theta = azimuth: RAO positive → positive theta (camera moves to +X)
-  // phi = polar from +Y: horizon is PI/2, CRA (above) decreases phi, CAU increases phi
-  const theta = raoDeg * (Math.PI / 180);
-  const phi = Math.PI / 2 - craDeg * (Math.PI / 180);
+  const theta = -raoDeg * DEG_TO_RAD;
+  const phi = Math.PI / 2 - craDeg * DEG_TO_RAD;
   return { theta, phi };
 }
 

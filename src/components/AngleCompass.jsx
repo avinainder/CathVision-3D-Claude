@@ -2,17 +2,18 @@ export default function AngleCompass({ angles }) {
   if (!angles) return null;
 
   // Map angles to position on 80x80 grid
-  // Horizontal: RAO left (R label), LAO right (L label)
-  // Vertical: CRA top (C label), CAU bottom (U label)
-  const hRaw = angles.horizontal.raw; // positive = RAO
-  const vRaw = angles.vertical.raw;   // positive = CRA
+  // Slicer convention: hRaw negative = RAO, positive = LAO
+  //                    vRaw negative = CRA, positive = CAU
+  // Layout: R (RAO) on left, L (LAO) on right, C (CRA) on top, U (CAU) on bottom
+  const hRaw = angles.horizontal.raw;
+  const vRaw = angles.vertical.raw;
 
-  // Negate hRaw so RAO (positive) maps left toward R label
-  const cx = 40 - (hRaw / 90) * 30;
-  const cy = 40 - (vRaw / 90) * 30;
+  // negative hRaw (RAO) → left, negative vRaw (CRA) → up
+  const cx = 40 + (hRaw / 90) * 30;
+  const cy = 40 + (vRaw / 90) * 30;
 
-  const hColor = hRaw >= 0 ? 'var(--color-rao)' : 'var(--color-lao)';
-  const vColor = vRaw >= 0 ? 'var(--color-cra)' : 'var(--color-cau)';
+  const hColor = hRaw < 0 ? 'var(--color-rao)' : 'var(--color-lao)';
+  const vColor = vRaw < 0 ? 'var(--color-cra)' : 'var(--color-cau)';
 
   return (
     <div className="angle-compass glass-panel" style={{ padding: 8 }}>

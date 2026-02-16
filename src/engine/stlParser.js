@@ -86,12 +86,31 @@ function buildGeometry(positions, normals, triCount) {
 }
 
 export function centerAndScale(geometry, targetSize = 15) {
+  // Apply RAS → Three.js coordinate transform.
+  // Medical STLs (from 3D Slicer, CT scanners) use RAS:
+  //   STL X = Right, STL Y = Anterior, STL Z = Superior
+  // Three.js with our camera convention:
+  //   X = screen-right, Y = up, Z = toward viewer
+  // Mapping: RAS_X → -X (radiological: R on left), RAS_Y → +Z, RAS_Z → +Y
+  const pos = geometry.getAttribute('position');
+  const norm = geometry.getAttribute('normal');
+  for (let i = 0; i < pos.count; i++) {
+    const rx = pos.getX(i), ry = pos.getY(i), rz = pos.getZ(i);
+    pos.setXYZ(i, -rx, rz, ry);
+    const nnx = norm.getX(i), nny = norm.getY(i), nnz = norm.getZ(i);
+    norm.setXYZ(i, -nnx, nnz, nny);
+  }
+  pos.needsUpdate = true;
+  norm.needsUpdate = true;
+
+  // Center at origin
   geometry.computeBoundingBox();
   const box = geometry.boundingBox;
   const center = new THREE.Vector3();
   box.getCenter(center);
   geometry.translate(-center.x, -center.y, -center.z);
 
+  // Scale to target size
   const size = new THREE.Vector3();
   box.getSize(size);
   const maxDim = Math.max(size.x, size.y, size.z);
