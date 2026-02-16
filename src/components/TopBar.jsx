@@ -13,7 +13,7 @@ export default function TopBar({
 
   return (
     <div className="top-bar glass-panel">
-      <span className="top-bar__version">v0.2</span>
+      <span className="top-bar__version">v0.3</span>
       <span className="top-bar__title">Coronary 3D</span>
       {fileName && (
         <span className="top-bar__info">
