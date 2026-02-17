@@ -96,9 +96,9 @@ export function centerAndScale(geometry, targetSize = 15) {
   const norm = geometry.getAttribute('normal');
   for (let i = 0; i < pos.count; i++) {
     const rx = pos.getX(i), ry = pos.getY(i), rz = pos.getZ(i);
-    pos.setXYZ(i, -rx, rz, ry);
+    pos.setXYZ(i, rx, rz, -ry);
     const nnx = norm.getX(i), nny = norm.getY(i), nnz = norm.getZ(i);
-    norm.setXYZ(i, -nnx, nnz, nny);
+    norm.setXYZ(i, nnx, nnz, -nny);
   }
   pos.needsUpdate = true;
   norm.needsUpdate = true;

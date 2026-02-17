@@ -11,7 +11,6 @@ import DropOverlay from './components/DropOverlay';
 import { parseSTL, centerAndScale } from './engine/stlParser';
 import { presetToSpherical } from './utils/carmAngles';
 import { captureScreenshot } from './utils/screenshot';
-import { generateDemoTree } from './utils/demoTree';
 
 const DEFAULT_COLOR = '#cc3333';
 const DEFAULT_BG = '#08080d';
@@ -19,6 +18,7 @@ const DEFAULT_BG = '#08080d';
 export default function App() {
   const engineRef = useRef(null);
   const [angles, setAngles] = useState(null);
+  const [debugSpherical, setDebugSpherical] = useState({ theta: 0, phi: Math.PI / 2 });
   const [fileName, setFileName] = useState(null);
   const [triCount, setTriCount] = useState(null);
   const [activeTool, setActiveTool] = useState(null);
@@ -35,26 +35,7 @@ export default function App() {
   const [flash, setFlash] = useState(false);
   const [labelInput, setLabelInput] = useState(null); // { point, screenPos }
 
-  // Load demo tree on mount
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      const engine = engineRef.current;
-      if (!engine) return;
-
-      const { group, labelPositions, triCount: tc } = generateDemoTree();
-      engine.scene.add(group);
-      engine.modelGroup = group;
-      setFileName('Demo Coronary Tree');
-      setTriCount(tc);
-
-      // Add pre-placed labels
-      Object.entries(labelPositions).forEach(([text, pos]) => {
-        engine.labelManager.addLabel(text, pos);
-      });
-      setLabels(engine.labelManager.getLabels());
-    }, 100);
-    return () => clearTimeout(timer);
-  }, []);
+  // No demo tree — app starts empty, user loads STL
 
   // Load STL file
   const loadSTLFile = useCallback((file) => {
@@ -297,7 +278,12 @@ export default function App() {
     >
       <Viewport
         engineRef={engineRef}
-        onAnglesChange={setAngles}
+        onAnglesChange={(a) => {
+          setAngles(a);
+          if (engineRef.current?.controller) {
+            setDebugSpherical(engineRef.current.controller.getSpherical());
+          }
+        }}
         activeTool={activeTool}
         measureStep={measureStep}
         onMeasurePoint={handleMeasurePoint}
@@ -318,6 +304,15 @@ export default function App() {
 
       <AngleHUD angles={angles} />
       <AngleCompass angles={angles} />
+      {/* Debug: raw spherical coords */}
+      <div style={{
+        position: 'fixed', bottom: 60, left: 12,
+        background: 'rgba(0,0,0,0.7)', color: '#0f0',
+        fontFamily: 'monospace', fontSize: 11, padding: '6px 10px',
+        borderRadius: 6, zIndex: 999,
+      }}>
+        T={debugSpherical.theta.toFixed(4)} P={debugSpherical.phi.toFixed(4)}
+      </div>
       <PresetBar onSelect={handlePresetSelect} />
 
       <ToolStatusBar
