@@ -106,6 +106,12 @@ export default function SettingsPanel({
           <div><kbd>Right-drag</kbd> / <kbd>Shift+drag</kbd> Pan</div>
           <div><kbd>Touch</kbd> 1-finger rotate, 2-finger zoom+pan</div>
         </div>
+
+        <h3 style={{ marginTop: 24 }}>Creator</h3>
+        <div style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.6 }}>
+          <div>Avinainder Singh</div>
+          <div style={{ opacity: 0.7 }}>Co-created with Claude (Anthropic)</div>
+        </div>
       </div>
     </>
   );
