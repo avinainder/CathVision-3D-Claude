@@ -16,19 +16,19 @@ export function generateDemoTree() {
   addTube(group, aortaPath, 1.2, 0.9);
   labelPositions['Aorta'] = new THREE.Vector3(0, 5.5, 0);
 
-  // Left Main (LM)
+  // Left Main (LM) — top-left, flowing right to left
   const lmPath = [
     new THREE.Vector3(0, 3, 0),
-    new THREE.Vector3(-0.8, 2.4, 0.3),
-    new THREE.Vector3(-1.8, 2.0, 0.5),
-    new THREE.Vector3(-2.8, 1.6, 0.4),
+    new THREE.Vector3(0.8, 2.4, 0.3),
+    new THREE.Vector3(1.8, 2.0, 0.5),
+    new THREE.Vector3(2.8, 1.6, 0.4),
   ];
   addTube(group, lmPath, 0.7, 0.55);
-  labelPositions['LM'] = new THREE.Vector3(-1.5, 2.3, 0.4);
+  labelPositions['LM'] = new THREE.Vector3(1.5, 2.3, 0.4);
 
   // LAD — Left Anterior Descending
   const ladBase = lmPath[lmPath.length - 1];
-  const ladPath = generateBranch(ladBase, new THREE.Vector3(-0.3, -0.6, 0.5), 12, 0.7, seededRandom);
+  const ladPath = generateBranch(ladBase, new THREE.Vector3(0.3, -0.6, 0.5), 12, 0.7, seededRandom);
   addTube(group, ladPath, 0.45, 0.2);
   labelPositions['LAD'] = ladPath[5].clone();
 
@@ -37,7 +37,7 @@ export function generateDemoTree() {
     if (i + 2 < ladPath.length) {
       const dBranch = generateBranch(
         ladPath[i],
-        new THREE.Vector3(-0.5, -0.3, 0.3),
+        new THREE.Vector3(0.5, -0.3, 0.3),
         4,
         0.5,
         seededRandom
@@ -47,7 +47,7 @@ export function generateDemoTree() {
   }
 
   // LCx — Left Circumflex
-  const lcxPath = generateBranch(ladBase, new THREE.Vector3(-0.5, -0.3, -0.5), 10, 0.6, seededRandom);
+  const lcxPath = generateBranch(ladBase, new THREE.Vector3(0.5, -0.3, -0.5), 10, 0.6, seededRandom);
   addTube(group, lcxPath, 0.4, 0.18);
   labelPositions['LCx'] = lcxPath[4].clone();
 
@@ -55,7 +55,7 @@ export function generateDemoTree() {
   for (let i = 3; i < lcxPath.length; i += 3) {
     const omBranch = generateBranch(
       lcxPath[i],
-      new THREE.Vector3(-0.3, -0.5, -0.2),
+      new THREE.Vector3(0.3, -0.5, -0.2),
       4,
       0.4,
       seededRandom
@@ -64,8 +64,8 @@ export function generateDemoTree() {
   }
 
   // RCA — Right Coronary Artery
-  const rcaStart = new THREE.Vector3(0.3, 2.8, 0.2);
-  const rcaPath = generateBranch(rcaStart, new THREE.Vector3(0.5, -0.5, -0.4), 12, 0.6, seededRandom);
+  const rcaStart = new THREE.Vector3(-0.3, 2.8, 0.2);
+  const rcaPath = generateBranch(rcaStart, new THREE.Vector3(-0.5, -0.5, -0.4), 12, 0.6, seededRandom);
   addTube(group, rcaPath, 0.45, 0.2);
   labelPositions['RCA'] = rcaPath[5].clone();
 
@@ -73,7 +73,7 @@ export function generateDemoTree() {
   for (let i = 4; i < rcaPath.length; i += 4) {
     const rBranch = generateBranch(
       rcaPath[i],
-      new THREE.Vector3(0.2, -0.5, -0.3),
+      new THREE.Vector3(-0.2, -0.5, -0.3),
       3,
       0.4,
       seededRandom
@@ -85,7 +85,7 @@ export function generateDemoTree() {
   if (rcaPath.length > 2) {
     const pdaPath = generateBranch(
       rcaPath[rcaPath.length - 1],
-      new THREE.Vector3(-0.3, -0.4, 0.4),
+      new THREE.Vector3(0.3, -0.4, 0.4),
       5,
       0.5,
       seededRandom
