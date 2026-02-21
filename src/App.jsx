@@ -9,6 +9,7 @@ import SettingsPanel from './components/SettingsPanel';
 import ToolStatusBar from './components/ToolStatusBar';
 import DropOverlay from './components/DropOverlay';
 import { parseSTL, centerAndScale } from './engine/stlParser';
+import { isolateLargestComponent } from './engine/meshFilter';
 import { presetToSpherical } from './utils/carmAngles';
 import { captureScreenshot } from './utils/screenshot';
 
@@ -34,6 +35,9 @@ export default function App() {
   const [dropping, setDropping] = useState(false);
   const [flash, setFlash] = useState(false);
   const [labelInput, setLabelInput] = useState(null); // { point, screenPos }
+  const [isolating, setIsolating] = useState(false);
+  const [isolated, setIsolated] = useState(false);
+  const originalGeometryRef = useRef(null);
 
   // No demo tree — app starts empty, user loads STL
 
@@ -56,11 +60,13 @@ export default function App() {
         engine.modelGroup = null;
       }
 
-      // Clear labels and measurements
+      // Clear labels, measurements, and isolation state
       engine.labelManager.dispose();
       engine.measureManager.dispose();
       setLabels([]);
       setMeasurements([]);
+      setIsolated(false);
+      originalGeometryRef.current = null;
 
       // Parse STL
       const { geometry, triCount: tc } = parseSTL(e.target.result);
@@ -88,6 +94,54 @@ export default function App() {
     };
     reader.readAsArrayBuffer(file);
   }, [activeColor, opacity, wireframe]);
+
+  // Isolate largest connected component
+  const handleIsolate = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine?.modelMesh || isolating) return;
+
+    // Store original geometry for undo
+    originalGeometryRef.current = engine.modelMesh.geometry;
+    setIsolating(true);
+
+    // Run in next tick so the UI updates with the spinner
+    setTimeout(() => {
+      try {
+        const { geometry, stats } = isolateLargestComponent(engine.modelMesh.geometry);
+
+        // Swap geometry on the mesh (don't dispose original — we keep it for undo)
+        engine.modelMesh.geometry = geometry;
+        setTriCount(stats.kept);
+        setIsolated(true);
+
+        console.log(
+          `Isolate: ${stats.components} components found. ` +
+          `Kept ${stats.kept.toLocaleString()} tris (largest), ` +
+          `removed ${stats.removed.toLocaleString()} tris.`
+        );
+      } catch (err) {
+        console.error('Isolation failed:', err);
+        originalGeometryRef.current = null;
+      }
+      setIsolating(false);
+    }, 0);
+  }, [isolating]);
+
+  // Undo isolation — restore original geometry
+  const handleUndoIsolate = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine?.modelMesh || !originalGeometryRef.current) return;
+
+    // Dispose the filtered geometry, restore original
+    const filteredGeometry = engine.modelMesh.geometry;
+    engine.modelMesh.geometry = originalGeometryRef.current;
+    filteredGeometry.dispose();
+
+    const origTriCount = originalGeometryRef.current.getAttribute('position').array.length / 9;
+    setTriCount(origTriCount);
+    setIsolated(false);
+    originalGeometryRef.current = null;
+  }, []);
 
   // Apply material settings to model
   const applyMaterialSettings = useCallback((color, op, wf) => {
@@ -295,6 +349,10 @@ export default function App() {
         triCount={triCount}
         activeTool={activeTool}
         onLoadSTL={loadSTLFile}
+        onIsolate={handleIsolate}
+        isolating={isolating}
+        isolated={isolated}
+        onUndoIsolate={handleUndoIsolate}
         onToggleLabels={handleToggleLabels}
         onToggleMeasure={handleToggleMeasure}
         onScreenshot={handleScreenshot}
