@@ -37,6 +37,8 @@ export default function App() {
   const [labelInput, setLabelInput] = useState(null); // { point, screenPos }
   const [isolating, setIsolating] = useState(false);
   const [isolated, setIsolated] = useState(false);
+  const [stlSpace, setStlSpace] = useState(null); // 'LPS' | 'RAS' | null (no tag, assumed LPS)
+  const [flipRL, setFlipRL] = useState(false);
   const originalGeometryRef = useRef(null);
 
   // No demo tree — app starts empty, user loads STL
@@ -68,9 +70,12 @@ export default function App() {
       setIsolated(false);
       originalGeometryRef.current = null;
 
-      // Parse STL
-      const { geometry, triCount: tc } = parseSTL(e.target.result);
-      centerAndScale(geometry);
+      // Parse STL — anatomical space is read from the Slicer header tag
+      // (SPACE=LPS / SPACE=RAS); untagged files are assumed LPS.
+      const { geometry, triCount: tc, space } = parseSTL(e.target.result);
+      centerAndScale(geometry, 15, space || 'LPS');
+      setStlSpace(space);
+      setFlipRL(false);
 
       const material = new THREE.MeshPhongMaterial({
         color: new THREE.Color(activeColor),
@@ -94,6 +99,15 @@ export default function App() {
     };
     reader.readAsArrayBuffer(file);
   }, [activeColor, opacity, wireframe]);
+
+  // Manual R/L flip — fallback for files with a missing or wrong header tag.
+  // 180° about the Superior (Y) axis swaps Right↔Left and Anterior↔Posterior,
+  // exactly the LPS↔RAS ambiguity.
+  const handleFlipRLChange = useCallback((val) => {
+    setFlipRL(val);
+    const engine = engineRef.current;
+    if (engine?.modelMesh) engine.modelMesh.rotation.y = val ? Math.PI : 0;
+  }, []);
 
   // Isolate largest connected component
   const handleIsolate = useCallback(() => {
@@ -370,6 +384,7 @@ export default function App() {
         borderRadius: 6, zIndex: 999,
       }}>
         T={debugSpherical.theta.toFixed(4)} P={debugSpherical.phi.toFixed(4)}
+        {fileName && ` | ${stlSpace ? `SPACE=${stlSpace}` : 'no SPACE tag (LPS assumed)'}${flipRL ? ' | R/L flipped' : ''}`}
       </div>
       <PresetBar onSelect={handlePresetSelect} />
 
@@ -389,6 +404,10 @@ export default function App() {
         onWireframeChange={handleWireframeChange}
         showLabels={showLabels}
         onShowLabelsChange={handleShowLabelsChange}
+        stlSpace={stlSpace}
+        hasModel={!!fileName}
+        flipRL={flipRL}
+        onFlipRLChange={handleFlipRLChange}
         activeColor={activeColor}
         onColorChange={handleColorChange}
         labels={labels}

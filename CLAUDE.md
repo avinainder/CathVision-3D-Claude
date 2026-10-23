@@ -1,10 +1,18 @@
 # CathVision-3D (Coronary Viewer)
 
 ## Critical: Coordinate Transforms
-- STL files from 3D Slicer use RAS (Right-Anterior-Superior)
-- RAS → Three.js mapping: `(rx, rz, -ry)` — NOT `(-rx, rz, ry)`
+- World axis contract (single source of truth, enforced by test/):
+  -X = patient Right, +X = Left, +Y = Superior, +Z = Anterior.
+  Camera at theta=0 is on the Anterior side (AP view, patient Right on viewer's Left).
+- STL files carry EITHER RAS or LPS coordinates. 3D Slicer >= 4.11 exports LPS by
+  default and tags the header with `SPACE=LPS` / `SPACE=RAS`; stlParser.js
+  auto-detects the tag and applies the matching transform:
+  RAS → `(-x, z, y)`, LPS → `(x, z, -y)`. Untagged files are assumed LPS.
+- The two transforms differ by 180° about Superior (R↔L and A↔P swap). Picking the
+  wrong one shows the mirror image — this caused repeated sign-flip churn in v0.2–v0.5.
+  Never hardcode one transform for all files; detect, and offer the Flip R/L toggle.
 - DO NOT patch individual coordinate signs downstream. Fix at the source (stlParser.js)
-- Use debug readout (theta/phi) to empirically diagnose orientation issues
+- Run `npm test` after touching stlParser.js or carmAngles.js (round-trip + orientation fixtures)
 
 ## Files: DO NOT MODIFY (v0.4 Slicer-aligned, working)
 - `src/utils/carmAngles.js` — C-arm angle computation + presets
