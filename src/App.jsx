@@ -9,6 +9,7 @@ import SettingsPanel from './components/SettingsPanel';
 import ToolStatusBar from './components/ToolStatusBar';
 import DropOverlay from './components/DropOverlay';
 import { parseSTL, centerAndScale } from './engine/stlParser';
+import { isolateLargestComponent } from './engine/meshFilter';
 import { presetToSpherical } from './utils/carmAngles';
 import { captureScreenshot } from './utils/screenshot';
 
@@ -34,6 +35,11 @@ export default function App() {
   const [dropping, setDropping] = useState(false);
   const [flash, setFlash] = useState(false);
   const [labelInput, setLabelInput] = useState(null); // { point, screenPos }
+  const [isolating, setIsolating] = useState(false);
+  const [isolated, setIsolated] = useState(false);
+  const [stlSpace, setStlSpace] = useState(null); // 'LPS' | 'RAS' | null (no tag, assumed LPS)
+  const [flipRL, setFlipRL] = useState(false);
+  const originalGeometryRef = useRef(null);
 
   // No demo tree — app starts empty, user loads STL
 
@@ -56,15 +62,20 @@ export default function App() {
         engine.modelGroup = null;
       }
 
-      // Clear labels and measurements
+      // Clear labels, measurements, and isolation state
       engine.labelManager.dispose();
       engine.measureManager.dispose();
       setLabels([]);
       setMeasurements([]);
+      setIsolated(false);
+      originalGeometryRef.current = null;
 
-      // Parse STL
-      const { geometry, triCount: tc } = parseSTL(e.target.result);
-      centerAndScale(geometry);
+      // Parse STL — anatomical space is read from the Slicer header tag
+      // (SPACE=LPS / SPACE=RAS); untagged files are assumed LPS.
+      const { geometry, triCount: tc, space } = parseSTL(e.target.result);
+      centerAndScale(geometry, 15, space || 'LPS');
+      setStlSpace(space);
+      setFlipRL(false);
 
       const material = new THREE.MeshPhongMaterial({
         color: new THREE.Color(activeColor),
@@ -88,6 +99,63 @@ export default function App() {
     };
     reader.readAsArrayBuffer(file);
   }, [activeColor, opacity, wireframe]);
+
+  // Manual R/L flip — fallback for files with a missing or wrong header tag.
+  // 180° about the Superior (Y) axis swaps Right↔Left and Anterior↔Posterior,
+  // exactly the LPS↔RAS ambiguity.
+  const handleFlipRLChange = useCallback((val) => {
+    setFlipRL(val);
+    const engine = engineRef.current;
+    if (engine?.modelMesh) engine.modelMesh.rotation.y = val ? Math.PI : 0;
+  }, []);
+
+  // Isolate largest connected component
+  const handleIsolate = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine?.modelMesh || isolating) return;
+
+    // Store original geometry for undo
+    originalGeometryRef.current = engine.modelMesh.geometry;
+    setIsolating(true);
+
+    // Run in next tick so the UI updates with the spinner
+    setTimeout(() => {
+      try {
+        const { geometry, stats } = isolateLargestComponent(engine.modelMesh.geometry);
+
+        // Swap geometry on the mesh (don't dispose original — we keep it for undo)
+        engine.modelMesh.geometry = geometry;
+        setTriCount(stats.kept);
+        setIsolated(true);
+
+        console.log(
+          `Isolate: ${stats.components} components found. ` +
+          `Kept ${stats.kept.toLocaleString()} tris (largest), ` +
+          `removed ${stats.removed.toLocaleString()} tris.`
+        );
+      } catch (err) {
+        console.error('Isolation failed:', err);
+        originalGeometryRef.current = null;
+      }
+      setIsolating(false);
+    }, 0);
+  }, [isolating]);
+
+  // Undo isolation — restore original geometry
+  const handleUndoIsolate = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine?.modelMesh || !originalGeometryRef.current) return;
+
+    // Dispose the filtered geometry, restore original
+    const filteredGeometry = engine.modelMesh.geometry;
+    engine.modelMesh.geometry = originalGeometryRef.current;
+    filteredGeometry.dispose();
+
+    const origTriCount = originalGeometryRef.current.getAttribute('position').array.length / 9;
+    setTriCount(origTriCount);
+    setIsolated(false);
+    originalGeometryRef.current = null;
+  }, []);
 
   // Apply material settings to model
   const applyMaterialSettings = useCallback((color, op, wf) => {
@@ -295,6 +363,10 @@ export default function App() {
         triCount={triCount}
         activeTool={activeTool}
         onLoadSTL={loadSTLFile}
+        onIsolate={handleIsolate}
+        isolating={isolating}
+        isolated={isolated}
+        onUndoIsolate={handleUndoIsolate}
         onToggleLabels={handleToggleLabels}
         onToggleMeasure={handleToggleMeasure}
         onScreenshot={handleScreenshot}
@@ -312,6 +384,7 @@ export default function App() {
         borderRadius: 6, zIndex: 999,
       }}>
         T={debugSpherical.theta.toFixed(4)} P={debugSpherical.phi.toFixed(4)}
+        {fileName && ` | ${stlSpace ? `SPACE=${stlSpace}` : 'no SPACE tag (LPS assumed)'}${flipRL ? ' | R/L flipped' : ''}`}
       </div>
       <PresetBar onSelect={handlePresetSelect} />
 
@@ -331,6 +404,10 @@ export default function App() {
         onWireframeChange={handleWireframeChange}
         showLabels={showLabels}
         onShowLabelsChange={handleShowLabelsChange}
+        stlSpace={stlSpace}
+        hasModel={!!fileName}
+        flipRL={flipRL}
+        onFlipRLChange={handleFlipRLChange}
         activeColor={activeColor}
         onColorChange={handleColorChange}
         labels={labels}

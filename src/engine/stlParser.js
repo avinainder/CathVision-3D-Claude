@@ -1,10 +1,23 @@
 import * as THREE from 'three';
 
 export function parseSTL(buffer) {
-  if (isBinarySTL(buffer)) {
-    return parseBinarySTL(buffer);
-  }
-  return parseASCIISTL(buffer);
+  const space = detectCoordinateSpace(buffer);
+  const parsed = isBinarySTL(buffer) ? parseBinarySTL(buffer) : parseASCIISTL(buffer);
+  return { ...parsed, space };
+}
+
+/**
+ * Detect the anatomical coordinate system from the STL header.
+ * 3D Slicer (>= 4.11) writes "SPACE=LPS" or "SPACE=RAS" into the
+ * 80-byte binary header / the "solid" line of ASCII files.
+ * Returns 'LPS', 'RAS', or null when the file carries no tag.
+ */
+export function detectCoordinateSpace(buffer) {
+  const head = new Uint8Array(buffer, 0, Math.min(512, buffer.byteLength));
+  let str = '';
+  for (let i = 0; i < head.length; i++) str += String.fromCharCode(head[i]);
+  const match = str.match(/SPACE\s*=\s*(LPS|RAS)/i);
+  return match ? match[1].toUpperCase() : null;
 }
 
 function isBinarySTL(buffer) {
@@ -85,20 +98,31 @@ function buildGeometry(positions, normals, triCount) {
   return { geometry, triCount };
 }
 
-export function centerAndScale(geometry, targetSize = 15) {
-  // Apply RAS → Three.js coordinate transform.
-  // Medical STLs (from 3D Slicer, CT scanners) use RAS:
-  //   STL X = Right, STL Y = Anterior, STL Z = Superior
-  // Three.js with our camera convention:
-  //   X = screen-right, Y = up, Z = toward viewer
-  // Mapping: RAS_X → -X (radiological: R on left), RAS_Y → +Z, RAS_Z → +Y
+export function centerAndScale(geometry, targetSize = 15, space = 'LPS') {
+  // Transform file coordinates into the world axis contract:
+  //   world -X = patient Right, +X = patient Left
+  //   world +Y = Superior,      -Y = Inferior
+  //   world +Z = Anterior,      -Z = Posterior
+  // (camera at theta=0 sits on the Anterior side = AP view,
+  //  patient Right on the viewer's Left — radiological convention)
+  //
+  // The file's anatomical space determines the mapping:
+  //   RAS (X=Right, Y=Anterior, Z=Superior):  (x,y,z) → (-x, z, y)
+  //   LPS (X=Left, Y=Posterior, Z=Superior):  (x,y,z) → (x, z, -y)
+  // Both are proper rotations (det=+1). They differ by 180° about the
+  // Superior axis — applying the wrong one shows the mirror-image view.
+  // 3D Slicer exports LPS by default (tagged in the header); we default
+  // to LPS when the file carries no tag.
+  const ras = space === 'RAS';
   const pos = geometry.getAttribute('position');
   const norm = geometry.getAttribute('normal');
   for (let i = 0; i < pos.count; i++) {
-    const rx = pos.getX(i), ry = pos.getY(i), rz = pos.getZ(i);
-    pos.setXYZ(i, rx, rz, -ry);
+    const fx = pos.getX(i), fy = pos.getY(i), fz = pos.getZ(i);
+    if (ras) pos.setXYZ(i, -fx, fz, fy);
+    else pos.setXYZ(i, fx, fz, -fy);
     const nnx = norm.getX(i), nny = norm.getY(i), nnz = norm.getZ(i);
-    norm.setXYZ(i, nnx, nnz, -nny);
+    if (ras) norm.setXYZ(i, -nnx, nnz, nny);
+    else norm.setXYZ(i, nnx, nnz, -nny);
   }
   pos.needsUpdate = true;
   norm.needsUpdate = true;

@@ -3,6 +3,10 @@ export default function TopBar({
   triCount,
   activeTool,
   onLoadSTL,
+  onIsolate,
+  isolating,
+  isolated,
+  onUndoIsolate,
   onToggleLabels,
   onToggleMeasure,
   onScreenshot,
@@ -35,6 +39,26 @@ export default function TopBar({
           e.target.value = '';
         }}
       />
+
+      {fileName && !isolated && (
+        <button
+          className={`top-bar__btn ${isolating ? 'top-bar__btn--active' : ''}`}
+          title="Isolate largest connected component (aorta + coronary tree)"
+          onClick={onIsolate}
+          disabled={isolating}
+        >
+          {isolating ? '⏳' : '✂️'} Isolate
+        </button>
+      )}
+      {isolated && (
+        <button
+          className="top-bar__btn"
+          title="Undo isolation — restore original mesh"
+          onClick={onUndoIsolate}
+        >
+          ↩️ Undo
+        </button>
+      )}
 
       <button
         className={`top-bar__btn ${activeTool === 'label' ? 'top-bar__btn--active' : ''}`}
