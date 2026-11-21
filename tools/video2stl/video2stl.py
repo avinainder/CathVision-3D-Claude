@@ -32,9 +32,12 @@ from skimage.filters import threshold_multiotsu, threshold_otsu
 from skimage.graph import MCP_Geometric
 
 FULL = np.ones((3, 3, 3), bool)
-# The CT image is reduced to at most this many pixels a side before analysis,
-# so behaviour (and memory) does not depend on how large the video was saved.
+# The CT image is first reduced to about this many pixels a side, so
+# behaviour (and memory) does not depend on how large the video was saved.
+# If the vessel turns out too small at that size, the analysis is repeated at
+# finer resolution: a full-slice video needs every pixel it has.
 WORKING_SIZE = 256
+MIN_WORKING_RADIUS = 3.0
 # A coronary artery is never a large fraction of the image; a bright
 # structure thicker than this is a chamber or the aorta.
 MAX_VESSEL_RADIUS_FRACTION = 0.08
@@ -82,6 +85,22 @@ def read_video(path):
     if n < 8:
         raise PipelineError(f"video has only {n} frames; an axial sweep needs many more")
     return np.frombuffer(raw, np.uint8, n * w * h).reshape(n, h, w)
+
+
+def video_rotation(path):
+    """Degrees of display rotation the file asks for (0 if none)."""
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream_side_data=rotation:stream_tags=rotate", "-of", "default=nw=1:nk=1", path],
+        capture_output=True, text=True)
+    for token in probe.stdout.split():
+        try:
+            degrees = int(float(token))
+        except ValueError:
+            continue
+        if degrees % 360:
+            return degrees
+    return 0
 
 
 def drop_duplicate_frames(frames):
@@ -694,10 +713,20 @@ SEGMENT_THIRDS = {
 
 
 def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, seed=None,
-        crop=None, frames=None, sweep="auto", reverse=False, vessel=None, log=print):
+        crop=None, frames=None, sweep="auto", reverse=False, vessel=None, log=print,
+        _decoded=None, _shrink=None):
     """Run the whole pipeline. Returns findings, mesh and QA data."""
-    stack = read_video(video)
+    decoded = read_video(video) if _decoded is None else _decoded
+    stack = decoded
     total_frames, frame_h, frame_w = stack.shape
+
+    # Exactly what the caller asked for, before anything below refines it.
+    asked = (ref_diameter_mm, pixel_mm, fov_mm, z_ratio, seed, crop, frames, sweep, reverse, vessel, log)
+
+    def finer(shrink):
+        """Start again one step finer (the video is not decoded twice)."""
+        return run(video, *asked, _decoded=decoded, _shrink=shrink - 1)
+
     first = 0
     if frames:
         first, last = frames
@@ -719,9 +748,15 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
     if len(stack) < 20:
         raise PipelineError("too few distinct slices to build a volume")
     warnings = []
+    rotation = video_rotation(video)
+    if rotation:
+        warnings.append(f"The video carries a {rotation} degree rotation flag, which was ignored: frames were "
+                        "analysed as stored. If the picture is normally viewed rotated, left/right and "
+                        "front/back in the model are wrong; re-encode the video upright first.")
 
-    # Analyse at a bounded working resolution, whatever size the video is.
-    shrink = max(1, int(np.ceil(max(w, h) / WORKING_SIZE)))
+    # Analyse at a bounded working resolution, whatever size the video is
+    # (a pixel or two of slack, so a slightly generous box does not coarsen it).
+    shrink = max(1, int(np.ceil((max(w, h) - 8) / WORKING_SIZE))) if _shrink is None else _shrink
     region = stack[:, y0:y0 + h, x0:x0 + w]
     if shrink > 1:
         hh, ww = (h // shrink) * shrink, (w // shrink) * shrink
@@ -733,6 +768,9 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
         + (f", analysed at 1/{shrink} size" if shrink > 1 else ""))
     if fov_mm and not pixel_mm:
         pixel_mm = fov_mm / w
+        if not crop:
+            warnings.append(f"--fov-mm was applied to the detected image region ({w} px wide). If that is not "
+                            "the full CT image, the scale is off; give the region with --crop.")
 
     vol_seg = ndimage.gaussian_filter(vol_raw, (0.7, 1.0, 1.0))
     bright_level, dark_level, wall_level = intensity_classes(vol_seg)
@@ -747,11 +785,19 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
                                 f"(image x {x0}-{x0 + w - 1}, y {y0}-{y0 + h - 1}, frames {kept[0]}-{kept[-1]})")
         seed_zyx = (int(np.argmin(np.abs(kept - sf))),
                     min((sy - y0) // shrink, vol_raw.shape[1] - 1), min((sx - x0) // shrink, vol_raw.shape[2] - 1))
-    mask, thick, thin = pick_vessel(bright, dt, seed_zyx)
+    try:
+        mask, thick, thin = pick_vessel(bright, dt, seed_zyx)
+    except PipelineError:
+        if shrink > 1:      # the vessel may simply be too small at this size
+            return finer(shrink)
+        raise
     core = mask & (dt >= np.percentile(dt[mask], 60))
     mask, bridges = bridge_gaps(mask, thin, thick, vol_seg, float(np.median(vol_seg[core])), dark_level)
     mask = ndimage.binary_fill_holes(mask)
     radius = 3.0 * float(ndimage.distance_transform_edt(mask)[mask].mean())
+    if shrink > 1 and radius < MIN_WORKING_RADIUS:
+        log(f"vessel is only {2 * radius:.0f} px wide at 1/{shrink} size; repeating at finer resolution")
+        return finer(shrink)
     log(f"vessel: {int(mask.sum())} voxels, radius about {radius:.1f} px"
         + (f", reconnected across {len(bridges)} gap(s)" if bridges else ""))
 
@@ -762,6 +808,12 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
     roi = tuple(slice(max(s.start - p, 0), min(s.stop + p, n))
                 for s, n, p in zip(sl, mask.shape, (3 * pad, pad, pad)))
     origin = np.array([s.start for s in roi], float)
+    # What counts as fat and as soft tissue is judged around the vessel, not
+    # over the whole image: a full slice is mostly lung, bone and chest wall.
+    try:
+        _, dark_level, wall_level = intensity_classes(vol_seg[roi])
+    except PipelineError:
+        pass
     mask, thick = mask[roi], thick[roi]
     vol_meas = ndimage.gaussian_filter(vol_raw, 0.4)[roi]
 
@@ -795,18 +847,22 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
     r_local = ndimage.map_coordinates(ndimage.distance_transform_edt(mask_iso), path.T, order=1)
     r_max = 2.5 * max(float(np.percentile(r_local, 95)), 2.0) + 4
     lumen_level = float(np.median(ndimage.map_coordinates(vol_iso, path.T, order=1)))
-    calcium_visible = lumen_level < 235
+    # Calcium must stand clear of the lumen by more than noise: with the lumen
+    # displayed near white there is no room left above it.
+    calcium_visible = lumen_level <= 198
     calcium_level = lumen_level + 0.35 * (255.0 - lumen_level) if calcium_visible else 1e9
     if not calcium_visible:
-        warnings.append("The lumen is displayed at or near white, so calcium cannot be told apart from contrast.")
+        warnings.append("The lumen is displayed too bright to tell calcium apart from contrast.")
     raw_diameter, _, calcified, strip, fit_info = measure_profile(
         vol_iso, path, r_max, lumen_level, dark_level, wall_level, calcium_level)
     diameter_px = ndimage.gaussian_filter1d(
         ndimage.median_filter(fill_gaps(raw_diameter), PROFILE_MEDIAN, mode="nearest"), PROFILE_SMOOTH)
 
     # Which end is proximal. The trace is trusted to start at the aorta only
-    # when exactly one end sits on a thick structure and that end is not the
-    # narrower one; a chamber lying beside the distal vessel fails that test.
+    # on two agreeing pieces of evidence: exactly one end sits on a thick
+    # structure, and that end is clearly the wider one. A chamber touching
+    # the distal vessel fails the second test; a vessel with no visible taper
+    # is simply not decided, and says so.
     sixth = max(len(path) // 6, 4)
     first_d, last_d = float(diameter_px[:sixth].mean()), float(diameter_px[-sixth:].mean())
     flip, proximal_known = last_d > first_d, False
@@ -816,10 +872,10 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
         on_thick = [float(ndimage.map_coordinates(gap, p[:, None], order=1)[0]) <= 4.0 for p in (path[0], path[-1])]
         if on_thick[0] != on_thick[1]:
             at_last = on_thick[1]
-            narrower = (last_d < 0.85 * first_d) if at_last else (first_d < 0.85 * last_d)
-            if not narrower:
+            wider = (last_d > 1.08 * first_d) if at_last else (first_d > 1.08 * last_d)
+            if wider:
                 flip, proximal_known = at_last, True
-                proximal_source = "the end arising from a thick structure (taken as the aorta)"
+                proximal_source = "the wider end, which arises from a thick structure (taken as the aorta)"
     if reverse:
         flip, proximal_known, proximal_source = not flip, True, "user (--reverse)"
     if flip:
@@ -843,6 +899,9 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
 
     s_px = np.arange(len(path)) * 0.5
     reference_px = reference_curve(s_px, diameter_px, window=8 * np.median(diameter_px))
+    if shrink > 1 and np.median(reference_px) < 2 * MIN_WORKING_RADIUS:
+        log(f"vessel is only {np.median(reference_px):.0f} px wide at 1/{shrink} size; repeating at finer resolution")
+        return finer(shrink)
     if pixel_mm:
         px_mm, scale_source = float(pixel_mm) * shrink, "user"
     else:

@@ -15,6 +15,7 @@ import tempfile
 import unittest
 
 import numpy as np
+from scipy import ndimage
 from scipy.spatial import cKDTree
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -104,6 +105,7 @@ class PhantomPipeline(unittest.TestCase):
     def test_origin_and_sweep_direction_are_inferred_from_the_aorta(self):
         assumptions = self.findings["assumptions"]
         self.assertIn("thick structure", assumptions["proximal_end"])
+        self.assertNotIn("assumed", assumptions["proximal_end"])
         self.assertEqual(assumptions["sweep"], "superior-to-inferior")
         self.assertTrue(assumptions["sweep_source"].startswith("inferred"))
         self.assertFalse(any("MIRROR" in w for w in self.findings["warnings"]))
@@ -252,7 +254,8 @@ class VideoVariants(unittest.TestCase):
 
     def test_a_larger_video_of_the_same_scan_gives_the_same_answer(self):
         vol8, truth = phantom()
-        big = np.repeat(np.repeat(vol8, 2, axis=1), 2, axis=2)       # 384 px: analysed at half size
+        # Smoothly enlarged to 384 px (not pixel-doubled, which halving would exactly undo).
+        big = np.clip(ndimage.zoom(vol8.astype(np.float32), (1, 2, 2), order=1), 0, 255).astype(np.uint8)
         with tempfile.TemporaryDirectory() as tmp:
             video, _ = write(tmp, big)
             findings = video2stl.run(video, ref_diameter_mm=truth["reference_diameter_mm"], log=quiet)["findings"]
@@ -262,6 +265,38 @@ class VideoVariants(unittest.TestCase):
         lesion = min(findings["lesions"], key=lambda l: abs(l["s_mm"] - truth["lesions"][0]["s_mm"]))
         self.assertGreaterEqual(lesion["percent_stenosis"], 25)
         self.assertLessEqual(lesion["percent_stenosis"], 45)
+
+    def test_a_small_vessel_in_a_full_slice_is_analysed_at_full_resolution(self):
+        # The same scan inside a 384 px field of soft tissue: at the usual
+        # working size the vessel would be 4 px wide and unmeasurable.
+        vol8, truth = phantom()
+        rng = np.random.default_rng(5)
+        field = np.clip(rng.normal(make_phantom.TISSUE, 9, (vol8.shape[0], 384, 384)), 0, 255).astype(np.uint8)
+        field[:, 96:288, 96:288] = vol8
+        with tempfile.TemporaryDirectory() as tmp:
+            video, _ = write(tmp, field)
+            findings = video2stl.run(video, ref_diameter_mm=truth["reference_diameter_mm"], log=quiet)["findings"]
+        self.assertEqual(findings["source"]["analysed_at_fraction_of_size"], "1/1")
+        self.assertAlmostEqual(findings["assumptions"]["mm_per_pixel"], truth["px_mm"], delta=0.04)
+        self.assertAlmostEqual(findings["length_mm"], truth["length_mm"], delta=0.12 * truth["length_mm"])
+        lesion = min(findings["lesions"], key=lambda l: abs(l["s_mm"] - truth["lesions"][0]["s_mm"]))
+        self.assertGreaterEqual(lesion["percent_stenosis"], 25)
+        self.assertLessEqual(lesion["percent_stenosis"], 45)
+
+    def test_a_chamber_at_the_far_end_is_not_taken_for_the_aorta(self):
+        # Aorta out of view, and a contrast-filled chamber touching the
+        # distal vessel: the direction of the sweep must not be "inferred".
+        original = make_phantom.CHAMBER_CENTER
+        make_phantom.CHAMBER_CENTER = (62.0, 58.0, 92.0)
+        try:
+            vol8, truth = make_phantom.build()
+        finally:
+            make_phantom.CHAMBER_CENTER = original
+        with tempfile.TemporaryDirectory() as tmp:
+            video, _ = write(tmp, vol8)
+            findings = video2stl.run(video, frames=(70, 200), ref_diameter_mm=3.0, log=quiet)["findings"]
+        self.assertEqual(findings["assumptions"]["sweep_source"], "assumed")
+        self.assertTrue(any("MIRROR" in w for w in findings["warnings"]))
 
     def test_an_image_with_no_contrast_is_refused(self):
         rng = np.random.default_rng(1)

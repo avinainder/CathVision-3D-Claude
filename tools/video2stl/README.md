@@ -25,9 +25,10 @@ No sample video is bundled. `make_phantom.py out_dir` writes a synthetic one wit
 
 ## What it does
 
-1. **Stack** — decodes every frame, drops held (repeated) frames, finds the CT image inside any
-   letterboxing or static captions, and reduces it to at most 256 px a side so results do not
-   depend on how large the video was saved.
+1. **Stack** — decodes every frame, drops held (repeated) frames, and finds the CT image inside any
+   letterboxing or static captions. It works at a reduced size (about 256 px a side) when the vessel
+   is still wide enough there, so an enlarged capture costs nothing extra, and at full size when it
+   is not — a full-slice video needs every pixel it has.
 2. **Segment** — keeps bright (contrast-filled) structures, removes thick ones (aorta, chambers), and
    picks the long thin one. An image with nothing clearly brighter than soft tissue is refused.
 3. **Reconnect** — if a tight stenosis dims the lumen until the trace stops, it looks ahead and
@@ -56,7 +57,7 @@ flagged as an assumption.
 |---|---|---|
 | **Scale (mm per pixel)** | `--pixel-mm` or `--fov-mm` if you know it. Otherwise from `--ref-diameter-mm` (default 3.0): the healthy proximal lumen is *assumed* to be that wide. | Every length and diameter scales with it. Percent stenosis does not. |
 | **Slice spacing** | Estimated from the vessel: where it runs in-plane, its cross-section must be round. `--z-ratio` overrides. | Lengths along the scan axis stretch or shrink. |
-| **Which end is proximal** | The end that sits on a thick structure (taken as the aorta), provided it is not the narrower end. Otherwise the wider end, with a warning. `--reverse` swaps. | Lesion positions are measured from the wrong end. |
+| **Which end is proximal** | Trusted only on two agreeing signs: exactly one end sits on a thick structure (taken as the aorta) *and* it is clearly the wider end. Otherwise the wider end is used, with a warning. `--reverse` swaps. | Lesion positions are measured from the wrong end. |
 | **Sweep direction** | Inferred only when the proximal end was identified: a coronary ostium lies superior to the rest of the vessel. Otherwise head-to-feet is assumed, with a warning. `--sweep s2i\|i2s` overrides. | The model is a **mirror image** of the anatomy. Rotating or Flip R/L cannot repair that — rerun with the other direction. |
 | **Plaque density** | Non-calcified plaque is assumed to be as bright as soft tissue. | Denser plaque → stenosis under-read; lipid-rich plaque → over-read. |
 | **Segment** | Thirds of the traced length (proximal / mid / distal), not anatomical landmarks. | A lesion can be filed under the neighbouring segment. |
@@ -109,15 +110,23 @@ modelled here, and no real video has been tested.
   and if the display window clips the lumen to white, calcium cannot be told from contrast at all.
 - Heavily calcified stretches are interpolated rather than measured.
 - Eccentric lesions are fitted as if concentric.
-- Roughly 2–3 % of held frames survive de-duplication on heavily compressed captures.
+- Held frames are removed reliably up to about four per slice. A heavily compressed capture that
+  holds each slice for five or more frames can keep many duplicates; check `slices_used` in the
+  findings against the number of slices you expect, and re-export the video if it is far off.
+- A full-slice video (the whole chest, vessel only a few pixels wide) is analysed at full size,
+  which is slow and memory-hungry: minutes and several gigabytes for 512 px. `--crop` to the heart
+  first if you can.
+- A rotation flag in the video file is ignored, with a warning; re-encode the video upright first.
 
 ## Tests
 
 ```bash
-.venv/bin/python -m unittest discover -s tools/video2stl -p "test_*.py"   # about 3 minutes
+.venv/bin/python -m unittest discover -s tools/video2stl -p "test_*.py"   # about 5 minutes
 ```
 
 They run the pipeline on phantom videos and check it against ground truth: scale, slice spacing,
 length, lesion position and severity, that the model sits one lumen radius from the true centerline
-and is not mirrored for either sweep direction, that a severe lesion is bridged and measured, and
-that bad input (no contrast, a seed in a chamber or outside the image) is refused with a message.
+and is not mirrored for either sweep direction, that a severe lesion is bridged and measured, that a
+chamber touching the far end is not mistaken for the aorta, that a small vessel in a large slice is
+still measured, and that bad input (no contrast, a seed in a chamber or outside the image) is
+refused with a message.
