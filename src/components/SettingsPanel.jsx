@@ -101,7 +101,9 @@ export default function SettingsPanel({
           )}
           {measurements.map((m) => (
             <div key={m.id} className="item-row">
-              <span style={{ fontFamily: 'var(--font-mono)' }}>{m.distance.toFixed(1)} mm</span>
+              <span style={{ fontFamily: 'var(--font-mono)' }}>
+                {m.estimated ? '~' : ''}{m.distance.toFixed(1)} mm{m.estimated ? ' (scale assumed)' : ''}
+              </span>
               <button className="item-row__delete" onClick={() => onDeleteMeasurement(m.id)}>✕</button>
             </div>
           ))}

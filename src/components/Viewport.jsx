@@ -1,89 +1,126 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { createScene, createCamera, createRenderer, createFloorGrid } from '../engine/scene';
 import { createCameraController } from '../engine/controls';
 import { createLabelManager } from '../engine/labelManager';
 import { createMeasureManager } from '../engine/measureManager';
+import { createSegmentMarkers } from '../engine/segmentMarkers';
 import { computeAngles } from '../utils/carmAngles';
 
+const TAP_MAX_MOVE_PX = 8;
+const TAP_MAX_MS = 600;
+
+/**
+ * The 3D canvas.
+ *
+ * `inset` is the part of the canvas covered by a docked panel ({ right,
+ * bottom } in CSS pixels); the view is shifted so the model stays centred in
+ * what remains visible.
+ */
 export default function Viewport({
   engineRef,
   onAnglesChange,
   activeTool,
-  measureStep,
   onMeasurePoint,
   onLabelClick,
+  onPinPoint,
+  onMarkerTap,
+  inset,
 }) {
   const canvasRef = useRef(null);
-  const frameRef = useRef(null);
+  // The listeners below are attached once; they read the latest props here.
+  const props = useRef({});
+  props.current = { onAnglesChange, activeTool, onMeasurePoint, onLabelClick, onPinPoint, onMarkerTap, inset };
 
-  const init = useCallback(() => {
+  useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const host = canvas.parentElement;
 
     const scene = createScene();
-    const camera = createCamera(canvas.clientWidth / canvas.clientHeight);
+    const camera = createCamera(host.clientWidth / Math.max(host.clientHeight, 1));
     const renderer = createRenderer(canvas);
-    renderer.setSize(canvas.clientWidth, canvas.clientHeight);
-
-    const grid = createFloorGrid();
-    scene.add(grid);
+    scene.add(createFloorGrid());
 
     const controller = createCameraController(camera, canvas);
     controller.attach();
 
-    const labelManager = createLabelManager(scene);
-    const measureManager = createMeasureManager(scene);
-
-    const raycaster = new THREE.Raycaster();
-    const mouse = new THREE.Vector2();
-
-    // Store engine refs
     const engine = {
       scene,
       camera,
       renderer,
       controller,
-      labelManager,
-      measureManager,
-      raycaster,
+      labelManager: createLabelManager(scene),
+      measureManager: createMeasureManager(scene),
+      segmentMarkers: createSegmentMarkers(),
+      raycaster: new THREE.Raycaster(),
       modelMesh: null,
       modelGroup: null,
+      mmPerUnit: 1,
+      estimated: false,
     };
+
+    // Size from the container, never from the canvas: three writes pixel
+    // sizes onto the canvas style, after which the canvas would report its
+    // own stale size forever.
+    function applySize() {
+      const w = host.clientWidth;
+      const h = host.clientHeight;
+      if (!w || !h) return;
+      renderer.setSize(w, h, false);
+      const { right = 0, bottom = 0 } = props.current.inset || {};
+      if (right || bottom) {
+        camera.setViewOffset(w, h, right / 2, bottom / 2, w, h);
+      } else {
+        camera.clearViewOffset();
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+    }
+    engine.applySize = applySize;
     engineRef.current = engine;
+    applySize();
+    const resizeObserver = new ResizeObserver(applySize);
+    resizeObserver.observe(host);
 
-    // Render loop
+    let frame;
+    let lastPose = '';
     function animate() {
-      frameRef.current = requestAnimationFrame(animate);
+      frame = requestAnimationFrame(animate);
       renderer.render(scene, camera);
-
-      // Update angles
-      const angles = computeAngles(camera.position, controller.state.target);
-      onAnglesChange(angles);
+      // Report angles only when the camera actually moved, so the React tree
+      // is not re-rendered sixty times a second while nothing changes.
+      const p = camera.position;
+      const t = controller.state.target;
+      const pose = `${p.x.toFixed(4)},${p.y.toFixed(4)},${p.z.toFixed(4)},${t.x.toFixed(3)},${t.y.toFixed(3)},${t.z.toFixed(3)}`;
+      if (pose !== lastPose) {
+        lastPose = pose;
+        props.current.onAnglesChange(computeAngles(p, t));
+      }
     }
     animate();
 
-    // Resize
-    function onResize() {
-      const w = canvas.clientWidth;
-      const h = canvas.clientHeight;
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
-    }
-    window.addEventListener('resize', onResize);
+    // Taps. The orbit controls cancel touch events, which also suppresses
+    // the browser's `click`, so taps are recognised from pointer events: one
+    // pointer, down and up in nearly the same place, briefly.
+    const pointer = new THREE.Vector2();
+    const active = new Set();
+    let press = null;
 
-    // Click handler for tools
-    function onClick(e) {
-      if (!engine.modelMesh && !engine.modelGroup) return;
-
+    function handleTap(clientX, clientY) {
       const rect = canvas.getBoundingClientRect();
-      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      pointer.set(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1
+      );
+      engine.raycaster.setFromCamera(pointer, camera);
+      const { activeTool: tool, onMarkerTap: markerTap, ...on } = props.current;
 
-      raycaster.setFromCamera(mouse, camera);
+      if (!tool) {
+        const marker = engine.raycaster.intersectObjects(engine.segmentMarkers.objects(), false)[0];
+        if (marker) markerTap?.(marker.object.userData.segmentId);
+        return;
+      }
 
-      // Collect meshes for raycasting
       const meshes = [];
       if (engine.modelMesh) meshes.push(engine.modelMesh);
       if (engine.modelGroup) {
@@ -91,77 +128,55 @@ export default function Viewport({
           if (child.isMesh) meshes.push(child);
         });
       }
+      const hit = engine.raycaster.intersectObjects(meshes, false)[0];
+      if (!hit) return;
+      if (tool === 'label') on.onLabelClick?.(hit.point);
+      else if (tool === 'measure') on.onMeasurePoint?.(hit.point);
+      else if (tool === 'pin') on.onPinPoint?.(hit.point);
+    }
 
-      const intersects = raycaster.intersectObjects(meshes, false);
-      if (intersects.length === 0) return;
+    function onPointerDown(e) {
+      active.add(e.pointerId);
+      const primary = e.pointerType !== 'mouse' || e.button === 0;
+      press = active.size === 1 && primary && !e.shiftKey
+        ? { id: e.pointerId, x: e.clientX, y: e.clientY, at: performance.now() }
+        : null;
+    }
 
-      const point = intersects[0].point;
-
-      if (activeTool === 'label') {
-        onLabelClick(point);
-      } else if (activeTool === 'measure') {
-        onMeasurePoint(point);
+    function onPointerUp(e) {
+      if (!active.delete(e.pointerId)) return;
+      const start = press;
+      press = null;
+      if (!start || start.id !== e.pointerId) return;
+      const moved = Math.hypot(e.clientX - start.x, e.clientY - start.y);
+      if (moved <= TAP_MAX_MOVE_PX && performance.now() - start.at <= TAP_MAX_MS) {
+        handleTap(e.clientX, e.clientY);
       }
     }
 
-    canvas.addEventListener('click', onClick);
+    function onPointerCancel(e) {
+      active.delete(e.pointerId);
+      press = null;
+    }
+
+    canvas.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
 
     return () => {
-      window.removeEventListener('resize', onResize);
-      canvas.removeEventListener('click', onClick);
+      canvas.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
+      resizeObserver.disconnect();
       controller.detach();
-      if (frameRef.current) cancelAnimationFrame(frameRef.current);
+      cancelAnimationFrame(frame);
       renderer.dispose();
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [engineRef]);
 
   useEffect(() => {
-    const cleanup = init();
-    return cleanup;
-  }, [init]);
-
-  // Update click handler when tool changes
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const engine = engineRef.current;
-    if (!canvas || !engine) return;
-
-    function onClick(e) {
-      // Ignore if this was a drag (mouse moved significantly)
-      if (!engine.modelMesh && !engine.modelGroup) return;
-      if (!activeTool) return;
-
-      const rect = canvas.getBoundingClientRect();
-      const mouse = new THREE.Vector2(
-        ((e.clientX - rect.left) / rect.width) * 2 - 1,
-        -((e.clientY - rect.top) / rect.height) * 2 + 1
-      );
-
-      engine.raycaster.setFromCamera(mouse, engine.camera);
-
-      const meshes = [];
-      if (engine.modelMesh) meshes.push(engine.modelMesh);
-      if (engine.modelGroup) {
-        engine.modelGroup.traverse((child) => {
-          if (child.isMesh) meshes.push(child);
-        });
-      }
-
-      const intersects = engine.raycaster.intersectObjects(meshes, false);
-      if (intersects.length === 0) return;
-
-      const point = intersects[0].point;
-
-      if (activeTool === 'label') {
-        onLabelClick(point);
-      } else if (activeTool === 'measure') {
-        onMeasurePoint(point);
-      }
-    }
-
-    canvas.addEventListener('click', onClick);
-    return () => canvas.removeEventListener('click', onClick);
-  }, [activeTool, measureStep, onMeasurePoint, onLabelClick, engineRef]);
+    engineRef.current?.applySize?.();
+  }, [engineRef, inset?.right, inset?.bottom]);
 
   return <canvas ref={canvasRef} className="viewport-canvas" />;
 }

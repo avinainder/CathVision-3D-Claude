@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 import Viewport from './components/Viewport';
 import TopBar from './components/TopBar';
@@ -6,15 +6,56 @@ import AngleHUD from './components/AngleHUD';
 import AngleCompass from './components/AngleCompass';
 import PresetBar from './components/PresetBar';
 import SettingsPanel from './components/SettingsPanel';
+import ReportPanel from './components/ReportPanel';
 import ToolStatusBar from './components/ToolStatusBar';
 import DropOverlay from './components/DropOverlay';
 import { parseSTL, centerAndScale } from './engine/stlParser';
 import { isolateLargestComponent } from './engine/meshFilter';
 import { presetToSpherical } from './utils/carmAngles';
 import { captureScreenshot } from './utils/screenshot';
+import {
+  emptyReport,
+  findingColor,
+  findingFor,
+  isReport,
+  sanitizeReport,
+  SEGMENTS,
+  suggestionsFromVideoFindings,
+} from './utils/cadrads';
 
 const DEFAULT_COLOR = '#cc3333';
-const DEFAULT_BG = '#08080d';
+
+// Space the docked report panel takes from the 3D view. These mirror the
+// .report-panel rules in global.css.
+const NARROW_SCREEN_PX = 760;
+const REPORT_PANEL_WIDTH_PX = 372;
+const REPORT_SHEET_FRACTION = 0.46;
+const FLY_MS = 600;
+
+// Reports are kept per model in this browser only. The key is a hash, so the
+// file name (which may identify a patient) is not itself stored.
+function reportStorageKey(file, triCount) {
+  let hash = 2166136261;
+  const text = `${file.name}:${file.size}:${triCount}`;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `cathvision.report.v1:${(hash >>> 0).toString(36)}`;
+}
+
+function loadStoredReport(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? sanitizeReport(JSON.parse(raw)) : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasContent(report) {
+  return Object.keys(report.segments).length > 0 || Object.keys(report.pins).length > 0;
+}
 
 export default function App() {
   const engineRef = useRef(null);
@@ -39,9 +80,38 @@ export default function App() {
   const [isolated, setIsolated] = useState(false);
   const [stlSpace, setStlSpace] = useState(null); // 'LPS' | 'RAS' | null (no tag, assumed LPS)
   const [flipRL, setFlipRL] = useState(false);
+  const [estimated, setEstimated] = useState(false); // model reconstructed from a video
+  const [reportOpen, setReportOpen] = useState(false);
+  const [report, setReport] = useState(emptyReport);
+  const [selectedSegment, setSelectedSegment] = useState(null);
+  const [pinningSegment, setPinningSegment] = useState(null);
+  const [reportNotes, setReportNotes] = useState([]);
+  const [screen, setScreen] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }));
   const originalGeometryRef = useRef(null);
+  const reportKeyRef = useRef(null);
+  const reportRef = useRef(report);
+  const targetTweenRef = useRef(null);
+  reportRef.current = report;
 
-  // No demo tree — app starts empty, user loads STL
+  useEffect(() => {
+    const onResize = () => setScreen({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const inset = useMemo(() => {
+    if (!reportOpen) return null;
+    return screen.w <= NARROW_SCREEN_PX
+      ? { bottom: Math.round(screen.h * REPORT_SHEET_FRACTION) }
+      : { right: REPORT_PANEL_WIDTH_PX };
+  }, [reportOpen, screen]);
+
+  const handleAngles = useCallback((a) => {
+    setAngles(a);
+    if (engineRef.current?.controller) {
+      setDebugSpherical(engineRef.current.controller.getSpherical());
+    }
+  }, []);
 
   // Load STL file
   const loadSTLFile = useCallback((file) => {
@@ -51,6 +121,7 @@ export default function App() {
       if (!engine) return;
 
       // Remove existing model
+      engine.segmentMarkers.detach();
       if (engine.modelMesh) {
         engine.scene.remove(engine.modelMesh);
         engine.modelMesh.geometry.dispose();
@@ -72,9 +143,13 @@ export default function App() {
 
       // Parse STL — anatomical space is read from the Slicer header tag
       // (SPACE=LPS / SPACE=RAS); untagged files are assumed LPS.
-      const { geometry, triCount: tc, space } = parseSTL(e.target.result);
-      centerAndScale(geometry, 15, space || 'LPS');
+      const parsed = parseSTL(e.target.result);
+      const { geometry, triCount: tc, space } = parsed;
+      const { mmPerUnit } = centerAndScale(geometry, 15, space || 'LPS');
+      engine.mmPerUnit = mmPerUnit;
+      engine.estimated = parsed.estimated;
       setStlSpace(space);
+      setEstimated(parsed.estimated);
       setFlipRL(false);
 
       const material = new THREE.MeshPhongMaterial({
@@ -89,8 +164,23 @@ export default function App() {
       const mesh = new THREE.Mesh(geometry, material);
       engine.scene.add(mesh);
       engine.modelMesh = mesh;
+      engine.segmentMarkers.attach(mesh);
       setFileName(file.name);
       setTriCount(tc);
+
+      // The report belongs to the model. Restore this model's report; if it
+      // has none, keep findings entered before any model was loaded, without
+      // their pins (those point into a different mesh).
+      const key = reportStorageKey(file, tc);
+      const carried = !reportKeyRef.current && hasContent(reportRef.current)
+        ? { ...reportRef.current, pins: {} }
+        : emptyReport();
+      reportKeyRef.current = key;
+      setReport(loadStoredReport(key) || carried);
+      setSelectedSegment(null);
+      setPinningSegment(null);
+      setReportNotes([]);
+      setActiveTool(null);
 
       // Reset camera
       const ctrl = engine.controller;
@@ -99,6 +189,32 @@ export default function App() {
     };
     reader.readAsArrayBuffer(file);
   }, [activeColor, opacity, wireframe]);
+
+  // Keep the report saved for this model.
+  useEffect(() => {
+    if (!reportKeyRef.current) return;
+    try {
+      localStorage.setItem(reportKeyRef.current, JSON.stringify(report));
+    } catch {
+      // Storage can be unavailable (private browsing) or full; the report
+      // then simply lasts for this session.
+    }
+  }, [report]);
+
+  // Keep the 3D markers in step with the pins and the grades behind them.
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine?.modelMesh) return;
+    engine.segmentMarkers.sync(
+      Object.entries(report.pins).map(([id, pin]) => ({
+        id,
+        local: pin.local,
+        color: findingColor(findingFor(report, id)),
+        text: SEGMENTS.find((s) => s.id === id)?.short || id,
+        selected: id === selectedSegment,
+      }))
+    );
+  }, [report, selectedSegment, fileName, triCount]);
 
   // Manual R/L flip — fallback for files with a missing or wrong header tag.
   // 180° about the Superior (Y) axis swaps Right↔Left and Anterior↔Posterior,
@@ -196,7 +312,10 @@ export default function App() {
   const handleShowLabelsChange = useCallback((val) => {
     setShowLabels(val);
     const engine = engineRef.current;
-    if (engine) engine.labelManager.setVisible(val);
+    if (engine) {
+      engine.labelManager.setVisible(val);
+      engine.segmentMarkers.setVisible(val);
+    }
   }, []);
 
   // Color change
@@ -207,13 +326,34 @@ export default function App() {
     if (engine) engine.scene.background = new THREE.Color(bg);
   }, [opacity, wireframe, applyMaterialSettings]);
 
-  // Preset select
-  const handlePresetSelect = useCallback((preset) => {
+  // Animate the camera to a view. `target`, if given, is where to look.
+  const flyTo = useCallback(({ theta, phi, radius, target }) => {
     const engine = engineRef.current;
     if (!engine) return;
-    const { theta, phi } = presetToSpherical(preset.rao, preset.cra);
-    engine.controller.animateTo(theta, phi, engine.controller.state.radius);
+    const ctrl = engine.controller;
+    // The controller takes the short way round only from within one turn.
+    ctrl.state.theta = Math.atan2(Math.sin(ctrl.state.theta), Math.cos(ctrl.state.theta));
+    cancelAnimationFrame(targetTweenRef.current);
+    if (target) {
+      const from = ctrl.state.target.clone();
+      const to = new THREE.Vector3().fromArray(target);
+      const started = performance.now();
+      const step = (now) => {
+        const t = Math.min((now - started) / FLY_MS, 1);
+        const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        ctrl.state.target.lerpVectors(from, to, ease);
+        ctrl.updateCamera();
+        if (t < 1) targetTweenRef.current = requestAnimationFrame(step);
+      };
+      targetTweenRef.current = requestAnimationFrame(step);
+    }
+    ctrl.animateTo(theta, phi, radius ?? ctrl.state.radius, FLY_MS);
   }, []);
+
+  // Preset select
+  const handlePresetSelect = useCallback((preset) => {
+    flyTo(presetToSpherical(preset.rao, preset.cra));
+  }, [flyTo]);
 
   // Screenshot
   const handleScreenshot = useCallback(() => {
@@ -239,12 +379,14 @@ export default function App() {
     setActiveTool((prev) => (prev === 'label' ? null : 'label'));
     setMeasureStep(0);
     setMeasureP1(null);
+    setPinningSegment(null);
   }, []);
 
   const handleToggleMeasure = useCallback(() => {
     setActiveTool((prev) => (prev === 'measure' ? null : 'measure'));
     setMeasureStep(0);
     setMeasureP1(null);
+    setPinningSegment(null);
   }, []);
 
   const handleToolDone = useCallback(() => {
@@ -252,6 +394,7 @@ export default function App() {
     setMeasureStep(0);
     setMeasureP1(null);
     setLabelInput(null);
+    setPinningSegment(null);
   }, []);
 
   // Label click
@@ -286,7 +429,7 @@ export default function App() {
     } else {
       const engine = engineRef.current;
       if (!engine || !measureP1) return;
-      engine.measureManager.addMeasurement(measureP1, point.clone());
+      engine.measureManager.addMeasurement(measureP1, point.clone(), engine.mmPerUnit, engine.estimated);
       setMeasurements(engine.measureManager.getMeasurements());
       setMeasureStep(0);
       setMeasureP1(null);
@@ -317,6 +460,132 @@ export default function App() {
     setMeasurements([]);
   }, []);
 
+  // --- Report panel -------------------------------------------------------
+
+  const handleToggleReport = useCallback(() => {
+    setReportOpen((open) => !open);
+    setSettingsOpen(false);
+    setPinningSegment(null);
+    setActiveTool((tool) => (tool === 'pin' ? null : tool));
+  }, []);
+
+  const handleStartPin = useCallback((segmentId) => {
+    setPinningSegment(segmentId);
+    setActiveTool('pin');
+    setMeasureStep(0);
+    setMeasureP1(null);
+  }, []);
+
+  const handleCancelPin = useCallback(() => {
+    setPinningSegment(null);
+    setActiveTool((tool) => (tool === 'pin' ? null : tool));
+  }, []);
+
+  // Pin a segment where the model was tapped, remembering the current view.
+  const handlePinPoint = useCallback((point) => {
+    const engine = engineRef.current;
+    if (!engine?.modelMesh || !pinningSegment) return;
+    const { theta, phi, radius } = engine.controller.getSpherical();
+    const pin = {
+      local: engine.modelMesh.worldToLocal(point.clone()).toArray(),
+      view: { theta, phi, radius, target: engine.controller.state.target.toArray() },
+      flipped: flipRL,
+    };
+    setReport((r) => ({ ...r, pins: { ...r.pins, [pinningSegment]: pin } }));
+    setPinningSegment(null);
+    setActiveTool(null);
+  }, [pinningSegment, flipRL]);
+
+  const handleRemovePin = useCallback((segmentId) => {
+    setReport((r) => {
+      const pins = { ...r.pins };
+      delete pins[segmentId];
+      return { ...r, pins };
+    });
+  }, []);
+
+  // A typical working projection for the segment, centred on its pin if it has one.
+  const handleFlyToView = useCallback((segmentId, view) => {
+    const engine = engineRef.current;
+    if (!engine?.modelMesh) return;
+    const pin = reportRef.current.pins[segmentId];
+    const target = pin
+      ? engine.modelMesh.localToWorld(new THREE.Vector3().fromArray(pin.local)).toArray()
+      : undefined;
+    flyTo({ ...presetToSpherical(view.rao, view.cra), target });
+  }, [flyTo]);
+
+  // Back to exactly the view the segment was pinned from. If the model has
+  // been flipped since, the saved view turns with it.
+  const handleFlyToPin = useCallback((segmentId) => {
+    const pin = reportRef.current.pins[segmentId];
+    if (!pin) return;
+    const turned = pin.flipped !== flipRL;
+    const [x, y, z] = pin.view.target;
+    flyTo({
+      theta: pin.view.theta + (turned ? Math.PI : 0),
+      phi: pin.view.phi,
+      radius: pin.view.radius,
+      target: turned ? [-x, y, -z] : [x, y, z],
+    });
+  }, [flyTo, flipRL]);
+
+  const handleSelectSegment = useCallback((segmentId) => {
+    setSelectedSegment(segmentId);
+    setPinningSegment(null);
+    setActiveTool((tool) => (tool === 'pin' ? null : tool));
+  }, []);
+
+  const handleMarkerTap = useCallback((segmentId) => {
+    setSelectedSegment(segmentId);
+    setReportOpen(true);
+    setSettingsOpen(false);
+  }, []);
+
+  // Import a report exported from the panel, or findings from tools/video2stl.
+  const handleImportFile = useCallback((file) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      let data;
+      try {
+        data = JSON.parse(reader.result);
+      } catch {
+        setReportNotes(['That file could not be read as JSON.']);
+        return;
+      }
+      if (data?.schema === 'cathvision.video2stl.findings/v1') {
+        const { suggestions, warnings } = suggestionsFromVideoFindings(data);
+        const ids = Object.keys(suggestions);
+        setReport((r) => {
+          const segments = { ...r.segments };
+          for (const id of ids) segments[id] = { ...findingFor(r, id), suggestion: suggestions[id] };
+          return { ...r, segments };
+        });
+        if (ids.length) setSelectedSegment(ids[0]);
+        setReportNotes([
+          ids.length
+            ? `Imported ${ids.length} video estimate${ids.length > 1 ? 's' : ''} as suggestions. Nothing is graded until you accept it.`
+            : 'The video findings contain no stenosis to suggest.',
+          ...warnings.map((w) => `Video trace: ${w}`),
+        ]);
+      } else if (isReport(data)) {
+        // Pins belong to the model on screen, not to the imported findings.
+        setReport((r) => ({ ...sanitizeReport(data), pins: r.pins }));
+        setReportNotes(['Report imported.']);
+      } else {
+        setReportNotes(['That file is neither a CathVision report nor a video2stl findings file.']);
+      }
+    };
+    reader.readAsText(file);
+  }, []);
+
+  const handleClearReport = useCallback(() => {
+    if (!window.confirm('Clear all findings and pins for this model?')) return;
+    setReport(emptyReport());
+    setSelectedSegment(null);
+    setReportNotes([]);
+  }, []);
+
   // Drag and drop
   const handleDragOver = useCallback((e) => {
     e.preventDefault();
@@ -337,25 +606,24 @@ export default function App() {
     }
   }, [loadSTLFile]);
 
+  const pinningName = pinningSegment ? SEGMENTS.find((s) => s.id === pinningSegment)?.name : null;
+
   return (
     <div
-      className="app"
+      className={`app ${reportOpen ? 'app--report' : ''}`}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
       <Viewport
         engineRef={engineRef}
-        onAnglesChange={(a) => {
-          setAngles(a);
-          if (engineRef.current?.controller) {
-            setDebugSpherical(engineRef.current.controller.getSpherical());
-          }
-        }}
+        onAnglesChange={handleAngles}
         activeTool={activeTool}
-        measureStep={measureStep}
         onMeasurePoint={handleMeasurePoint}
         onLabelClick={handleLabelClick}
+        onPinPoint={handlePinPoint}
+        onMarkerTap={handleMarkerTap}
+        inset={inset}
       />
 
       <TopBar
@@ -371,18 +639,20 @@ export default function App() {
         onToggleMeasure={handleToggleMeasure}
         onScreenshot={handleScreenshot}
         onResetView={handleResetView}
+        reportOpen={reportOpen}
+        onToggleReport={handleToggleReport}
         onToggleSettings={() => setSettingsOpen(!settingsOpen)}
       />
 
       <AngleHUD angles={angles} />
       <AngleCompass angles={angles} />
+      {estimated && (
+        <div className="estimate-badge glass-panel" role="note">
+          Estimated geometry from video · scale assumed · not for measurement
+        </div>
+      )}
       {/* Debug: raw spherical coords */}
-      <div style={{
-        position: 'fixed', bottom: 60, left: 12,
-        background: 'rgba(0,0,0,0.7)', color: '#0f0',
-        fontFamily: 'monospace', fontSize: 11, padding: '6px 10px',
-        borderRadius: 6, zIndex: 999,
-      }}>
+      <div className="debug-readout">
         T={debugSpherical.theta.toFixed(4)} P={debugSpherical.phi.toFixed(4)}
         {fileName && ` | ${stlSpace ? `SPACE=${stlSpace}` : 'no SPACE tag (LPS assumed)'}${flipRL ? ' | R/L flipped' : ''}`}
       </div>
@@ -391,8 +661,29 @@ export default function App() {
       <ToolStatusBar
         tool={activeTool}
         measureStep={measureStep}
+        pinningName={pinningName}
         onDone={handleToolDone}
         onCancel={handleToolDone}
+      />
+
+      <ReportPanel
+        open={reportOpen}
+        onClose={handleToggleReport}
+        report={report}
+        onChange={setReport}
+        selected={selectedSegment}
+        onSelect={handleSelectSegment}
+        hasModel={!!fileName}
+        estimated={estimated}
+        notes={reportNotes}
+        pinningSegment={pinningSegment}
+        onStartPin={handleStartPin}
+        onCancelPin={handleCancelPin}
+        onRemovePin={handleRemovePin}
+        onFlyToView={handleFlyToView}
+        onFlyToPin={handleFlyToPin}
+        onImportFile={handleImportFile}
+        onClear={handleClearReport}
       />
 
       <SettingsPanel

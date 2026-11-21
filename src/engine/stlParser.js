@@ -1,9 +1,22 @@
 import * as THREE from 'three';
 
 export function parseSTL(buffer) {
-  const space = detectCoordinateSpace(buffer);
+  const header = readHeader(buffer);
   const parsed = isBinarySTL(buffer) ? parseBinarySTL(buffer) : parseASCIISTL(buffer);
-  return { ...parsed, space };
+  return {
+    ...parsed,
+    space: detectCoordinateSpace(buffer),
+    // tools/video2stl marks meshes reconstructed from a video: their scale
+    // is assumed, so the viewer must not present distances as measurements.
+    estimated: /\bESTIMATED\b/.test(header),
+  };
+}
+
+function readHeader(buffer) {
+  const head = new Uint8Array(buffer, 0, Math.min(512, buffer.byteLength));
+  let str = '';
+  for (let i = 0; i < head.length; i++) str += String.fromCharCode(head[i]);
+  return str;
 }
 
 /**
@@ -13,10 +26,7 @@ export function parseSTL(buffer) {
  * Returns 'LPS', 'RAS', or null when the file carries no tag.
  */
 export function detectCoordinateSpace(buffer) {
-  const head = new Uint8Array(buffer, 0, Math.min(512, buffer.byteLength));
-  let str = '';
-  for (let i = 0; i < head.length; i++) str += String.fromCharCode(head[i]);
-  const match = str.match(/SPACE\s*=\s*(LPS|RAS)/i);
+  const match = readHeader(buffer).match(/SPACE\s*=\s*(LPS|RAS)/i);
   return match ? match[1].toUpperCase() : null;
 }
 
@@ -138,9 +148,9 @@ export function centerAndScale(geometry, targetSize = 15, space = 'LPS') {
   const size = new THREE.Vector3();
   box.getSize(size);
   const maxDim = Math.max(size.x, size.y, size.z);
-  if (maxDim > 0) {
-    const scale = targetSize / maxDim;
-    geometry.scale(scale, scale, scale);
-  }
+  const scale = maxDim > 0 ? targetSize / maxDim : 1;
+  geometry.scale(scale, scale, scale);
   geometry.computeBoundingSphere();
+  // STL coordinates are millimetres; one scene unit is this many of them.
+  return { mmPerUnit: 1 / scale };
 }

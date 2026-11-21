@@ -3,7 +3,7 @@ import * as THREE from 'three';
 export function createMeasureManager(scene) {
   const measurements = [];
 
-  function createDistanceSprite(distance) {
+  function createDistanceSprite(text) {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     canvas.width = 192;
@@ -18,7 +18,7 @@ export function createMeasureManager(scene) {
     ctx.fillStyle = '#ffdd44';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(`${distance.toFixed(1)} mm`, canvas.width / 2, canvas.height / 2);
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.minFilter = THREE.LinearFilter;
@@ -40,8 +40,10 @@ export function createMeasureManager(scene) {
     return mesh;
   }
 
-  function addMeasurement(p1, p2) {
-    const distance = p1.distanceTo(p2);
+  // The model is rescaled to fit the scene, so scene distance is converted
+  // back to millimetres. `estimated` marks a model whose scale was assumed.
+  function addMeasurement(p1, p2, mmPerUnit = 1, estimated = false) {
+    const distance = p1.distanceTo(p2) * mmPerUnit;
     const midpoint = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
     midpoint.y += 0.4;
 
@@ -55,7 +57,7 @@ export function createMeasureManager(scene) {
     const dot2 = createEndpoint(p2);
 
     // Distance label
-    const label = createDistanceSprite(distance);
+    const label = createDistanceSprite(`${estimated ? '~' : ''}${distance.toFixed(1)} mm`);
     label.position.copy(midpoint);
 
     scene.add(line);
@@ -64,8 +66,8 @@ export function createMeasureManager(scene) {
     scene.add(label);
 
     const id = crypto.randomUUID();
-    measurements.push({ id, p1: p1.clone(), p2: p2.clone(), distance, line, dot1, dot2, label });
-    return { id, distance };
+    measurements.push({ id, p1: p1.clone(), p2: p2.clone(), distance, estimated, line, dot1, dot2, label });
+    return { id, distance, estimated };
   }
 
   function removeMeasurement(id) {
@@ -95,7 +97,7 @@ export function createMeasureManager(scene) {
   }
 
   function getMeasurements() {
-    return measurements.map(({ id, p1, p2, distance }) => ({ id, p1, p2, distance }));
+    return measurements.map(({ id, p1, p2, distance, estimated }) => ({ id, p1, p2, distance, estimated }));
   }
 
   function dispose() {

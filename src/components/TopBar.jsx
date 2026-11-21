@@ -11,13 +11,15 @@ export default function TopBar({
   onToggleMeasure,
   onScreenshot,
   onResetView,
+  reportOpen,
+  onToggleReport,
   onToggleSettings,
 }) {
   const fileInputId = 'stl-file-input';
 
   return (
     <div className="top-bar glass-panel">
-      <span className="top-bar__version">v0.4</span>
+      <span className="top-bar__version">v0.6</span>
       <span className="top-bar__title">Coronary 3D</span>
       {fileName && (
         <span className="top-bar__info">
@@ -79,6 +81,14 @@ export default function TopBar({
       </button>
       <button className="top-bar__btn" title="Reset view" onClick={onResetView}>
         🎯
+      </button>
+      <button
+        className={`top-bar__btn ${reportOpen ? 'top-bar__btn--active' : ''}`}
+        title="CAD-RADS report"
+        aria-label="CAD-RADS report"
+        onClick={onToggleReport}
+      >
+        📋
       </button>
       <button className="top-bar__btn" title="Settings" onClick={onToggleSettings}>
         ⚙️
