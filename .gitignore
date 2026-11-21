@@ -4,3 +4,8 @@ dist
 *.local
 .vercel
 .playwright-mcp/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
