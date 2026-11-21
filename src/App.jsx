@@ -648,7 +648,7 @@ export default function App() {
       <AngleCompass angles={angles} />
       {estimated && (
         <div className="estimate-badge glass-panel" role="note">
-          Estimated geometry from video · scale assumed · not for measurement
+          Estimated from video · not for measurement
         </div>
       )}
       {/* Debug: raw spherical coords */}

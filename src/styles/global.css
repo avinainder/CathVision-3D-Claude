@@ -120,12 +120,14 @@ html, body, #root {
   border-color: rgba(68, 170, 221, 0.4);
 }
 
-.top-bar__btn--load {
+/* A button with a text label beside its icon. */
+.top-bar__btn--wide {
   width: auto;
   padding: 0 14px;
   font-size: 13px;
   font-weight: 500;
   gap: 6px;
+  white-space: nowrap;
 }
 
 /* Angle HUD */
@@ -991,16 +993,32 @@ html, body, #root {
 
 /* Responsive */
 @media (max-width: 640px) {
+  /* Icons only, so every tool stays reachable on a phone. */
   .top-bar {
     top: 8px;
     left: 8px;
     right: 8px;
-    height: 42px;
-    padding: 0 8px;
+    height: 46px;
+    padding: 0 6px;
+    gap: 5px;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
 
-  .top-bar__title {
-    font-size: 12px;
+  .top-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .top-bar__title,
+  .top-bar__version,
+  .top-bar__btn-text {
+    display: none;
+  }
+
+  .top-bar__btn--wide {
+    width: 36px;
+    padding: 0;
+    font-size: 16px;
   }
 
   .top-bar__info {

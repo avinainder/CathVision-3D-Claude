@@ -101,3 +101,17 @@ test('RAS and LPS transforms agree on anatomy: same patient-space point, same wo
   // LPS (-10,0,0) = patient Right → world (-7.5, 0, 0)
   assert.ok(findVertex(lpsFile.geometry, -7.5, 0, 0));
 });
+
+test('centerAndScale reports how many millimetres one scene unit is', () => {
+  // The fixture spans 20 mm and is scaled to 15 scene units.
+  const { geometry } = parseSTL(buildBinarySTL('SPACE=LPS', MARKER_TRIS));
+  const { mmPerUnit } = centerAndScale(geometry, 15, 'LPS');
+  assert.ok(Math.abs(mmPerUnit - 20 / 15) < 1e-6);
+});
+
+test('video-derived meshes are recognised by their ESTIMATED header tag', () => {
+  const tagged = parseSTL(buildBinarySTL('CathVision video2stl ESTIMATED SCALE=ASSUMED SPACE=LPS', MARKER_TRIS));
+  assert.equal(tagged.estimated, true);
+  assert.equal(tagged.space, 'LPS');
+  assert.equal(parseSTL(buildBinarySTL('3D Slicer output. SPACE=LPS', MARKER_TRIS)).estimated, false);
+});

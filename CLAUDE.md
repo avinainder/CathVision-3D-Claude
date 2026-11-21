@@ -20,9 +20,34 @@
 - `src/components/AngleCompass.jsx` — compass display mapping
 
 ## Key Files
-- `src/engine/stlParser.js` — RAS transform (the critical orientation fix)
+- `src/engine/stlParser.js` — coordinate-space detection + transform; returns `mmPerUnit` and the `estimated` flag
 - `src/engine/scene.js` — lighting (ambient 1.4 + 4x directional 0.3), background #1a1a2e
 - `src/App.jsx` — main app, debug T/P readout at bottom-left
+- `src/components/Viewport.jsx` — canvas, render loop, tap detection, sizing
+- `src/utils/cadrads.js` — CAD-RADS 2.0 logic (pure; covered by `test/cadrads.test.js`)
+- `src/components/ReportPanel.jsx` — coronary map, segment editor, report text
+- `src/engine/segmentMarkers.js` — 3D pins for report segments
+- `tools/video2stl/` — Python: axial-sweep CT video → STL + findings JSON (see its README)
+
+## Viewport conventions (each of these was a real bug)
+- Recognise taps from pointer events, never `click`: controls.js cancels touch events,
+  which suppresses `click` on phones. A drag must not count as a tap.
+- Size the renderer from the canvas's container with `setSize(w, h, false)`. Measuring the
+  canvas itself goes stale, because three writes pixel sizes into its style.
+- Models are rescaled to fit the scene. Anything shown in mm must multiply scene distance
+  by `engine.mmPerUnit`. STL units are assumed to be millimetres.
+- Anything attached to the model (segment pins) is a child of the mesh in mesh-local
+  coordinates, so it follows Flip R/L. Labels and measurements are still world-space.
+- Push camera angles to React only when the camera moves, not every frame.
+
+## Report panel
+- Findings are entered by the reader from the source CCTA. The app classifies and formats;
+  it never grades stenosis from the mesh. Keep that line: no "measured" or "detected" wording.
+- `tools/video2stl` findings import as suggestions and must not change the classification
+  until accepted. Meshes whose STL header says `ESTIMATED` are labelled as such in the UI.
+- Reports persist per model in localStorage under a hashed key (file names can identify
+  patients; do not store or export them).
+- Panel sizes in `global.css` (`.report-panel`) are mirrored by the `REPORT_*` constants in App.jsx.
 
 ## C-arm Angle Math
 - `presetToSpherical()`: theta = -raoDeg * DEG_TO_RAD, phi = PI/2 - craDeg * DEG_TO_RAD
@@ -38,3 +63,10 @@
 - `npm run dev` — Vite dev server on localhost:5173
 - `npx vercel --prod --yes` — deploy to production
 - React 18 + Vite + Three.js, no TypeScript
+
+## Tests
+- `npm test` — node tests in `test/` (angles round trip, STL orientation, CAD-RADS rules)
+- `python -m unittest discover -s tools/video2stl -p "test_*.py"` — pipeline vs. phantom (~90 s; needs
+  ffmpeg and `tools/video2stl/requirements.txt`)
+- `node scripts/e2e-report.mjs --stl … --findings …` — drives a running build in Chromium on desktop
+  and phone (touch) viewports; needs Playwright. Run it after touching Viewport, App or the report panel.

@@ -28,8 +28,8 @@ export default function TopBar({
       )}
       <div className="top-bar__spacer" />
 
-      <label className="top-bar__btn top-bar__btn--load" htmlFor={fileInputId} title="Load STL file">
-        📂 Load STL
+      <label className="top-bar__btn top-bar__btn--wide" htmlFor={fileInputId} title="Load STL file">
+        📂<span className="top-bar__btn-text">Load STL</span>
       </label>
       <input
         id={fileInputId}
@@ -44,27 +44,30 @@ export default function TopBar({
 
       {fileName && !isolated && (
         <button
-          className={`top-bar__btn ${isolating ? 'top-bar__btn--active' : ''}`}
+          className={`top-bar__btn top-bar__btn--wide ${isolating ? 'top-bar__btn--active' : ''}`}
           title="Isolate largest connected component (aorta + coronary tree)"
+          aria-label="Isolate largest component"
           onClick={onIsolate}
           disabled={isolating}
         >
-          {isolating ? '⏳' : '✂️'} Isolate
+          {isolating ? '⏳' : '✂️'}<span className="top-bar__btn-text">Isolate</span>
         </button>
       )}
       {isolated && (
         <button
-          className="top-bar__btn"
+          className="top-bar__btn top-bar__btn--wide"
           title="Undo isolation — restore original mesh"
+          aria-label="Undo isolation"
           onClick={onUndoIsolate}
         >
-          ↩️ Undo
+          ↩️<span className="top-bar__btn-text">Undo</span>
         </button>
       )}
 
       <button
         className={`top-bar__btn ${activeTool === 'label' ? 'top-bar__btn--active' : ''}`}
         title="Label tool"
+        aria-label="Label tool"
         onClick={onToggleLabels}
       >
         🏷️
@@ -72,14 +75,15 @@ export default function TopBar({
       <button
         className={`top-bar__btn ${activeTool === 'measure' ? 'top-bar__btn--active' : ''}`}
         title="Measure tool"
+        aria-label="Measure tool"
         onClick={onToggleMeasure}
       >
         📏
       </button>
-      <button className="top-bar__btn" title="Screenshot" onClick={onScreenshot}>
+      <button className="top-bar__btn" title="Screenshot" aria-label="Screenshot" onClick={onScreenshot}>
         📸
       </button>
-      <button className="top-bar__btn" title="Reset view" onClick={onResetView}>
+      <button className="top-bar__btn" title="Reset view" aria-label="Reset view" onClick={onResetView}>
         🎯
       </button>
       <button
@@ -90,7 +94,7 @@ export default function TopBar({
       >
         📋
       </button>
-      <button className="top-bar__btn" title="Settings" onClick={onToggleSettings}>
+      <button className="top-bar__btn" title="Settings" aria-label="Settings" onClick={onToggleSettings}>
         ⚙️
       </button>
     </div>

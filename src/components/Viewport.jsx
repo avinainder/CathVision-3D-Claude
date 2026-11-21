@@ -68,6 +68,9 @@ export default function Viewport({
       if (!w || !h) return;
       renderer.setSize(w, h, false);
       const { right = 0, bottom = 0 } = props.current.inset || {};
+      // The view is framed by its height, so when a panel takes height away
+      // the picture shrinks with it and still fits what is left.
+      camera.zoom = (h - bottom) / h;
       if (right || bottom) {
         camera.setViewOffset(w, h, right / 2, bottom / 2, w, h);
       } else {
@@ -113,6 +116,8 @@ export default function Viewport({
         -((clientY - rect.top) / rect.height) * 2 + 1
       );
       engine.raycaster.setFromCamera(pointer, camera);
+      // Objects added since the last rendered frame have no world transform yet.
+      scene.updateMatrixWorld();
       const { activeTool: tool, onMarkerTap: markerTap, ...on } = props.current;
 
       if (!tool) {
