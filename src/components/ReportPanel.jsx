@@ -130,6 +130,7 @@ function Chips({ options, value, onPick, colored }) {
 
 function SegmentEditor({
   segment, report, onFinding, hasModel, pinning, onStartPin, onCancelPin, onRemovePin, onFlyToView, onFlyToPin,
+  onBackToMap,
 }) {
   const finding = findingFor(report, segment.id);
   const pinned = !!report.pins[segment.id];
@@ -145,6 +146,7 @@ function SegmentEditor({
         <span className="segment-editor__dot" style={{ background: findingColor(finding) }} />
         {segment.name}
         <span className="segment-editor__number">segment {segment.n}</span>
+        <button type="button" className="segment-editor__back" onClick={onBackToMap}>Map ↑</button>
       </div>
 
       {suggestion && (
@@ -261,6 +263,7 @@ function ReportPanel({
   const [copyState, setCopyState] = useState(null);
   const fileInput = useRef(null);
   const editor = useRef(null);
+  const body = useRef(null);
   const result = useMemo(() => classify(report), [report]);
   const text = useMemo(() => reportText(report), [report]);
   const active = segmentsFor(report.dominance);
@@ -329,7 +332,7 @@ function ReportPanel({
         <button type="button" className="report-panel__close" aria-label="Close report" onClick={onClose}>✕</button>
       </div>
 
-      <div className="report-panel__body">
+      <div className="report-panel__body" ref={body}>
         {tab === 'map' && (
           <>
             <div className="report-panel__meaning">{result.meaning}</div>
@@ -371,6 +374,7 @@ function ReportPanel({
                 onRemovePin={onRemovePin}
                 onFlyToView={onFlyToView}
                 onFlyToPin={onFlyToPin}
+                onBackToMap={() => body.current?.scrollTo({ top: 0, behavior: 'smooth' })}
               />
             ) : (
               <div className="hint hint--center">Tap a segment to enter its findings.</div>

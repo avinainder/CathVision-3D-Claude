@@ -160,6 +160,10 @@ async function run(profile, context, touch) {
       return title.top >= body.top - 2 && title.bottom <= body.bottom;
     }, null, { timeout: 3000 }).then(() => true, () => false);
     check(profile, 'choosing a segment brings its editor into view on a phone', inView);
+    await page.locator('.segment-editor__back').click();
+    const mapBack = await page.waitForFunction(() => document.querySelector('.report-panel__body').scrollTop < 4,
+      null, { timeout: 3000 }).then(() => true, () => false);
+    check(profile, 'the editor offers a way back up to the map on a phone', mapBack);
   }
 
   // A drag must orbit, not pin.

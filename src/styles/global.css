@@ -792,6 +792,21 @@ html, body, #root {
   color: var(--text-dim);
 }
 
+/* On a phone the map scrolls out of the short sheet while a segment is
+   edited; this brings it back. Hidden where the map stays in view. */
+.segment-editor__back {
+  display: none;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 10px;
+  min-height: 32px;
+  cursor: pointer;
+}
+
 .field-label {
   display: flex;
   align-items: baseline;
@@ -946,6 +961,10 @@ html, body, #root {
 
   .chip {
     min-height: 40px;
+  }
+
+  .segment-editor__back {
+    display: block;
   }
 
   .app--report .angle-compass {
