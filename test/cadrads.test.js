@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   classify,
   emptyReport,
+  isEmptyReport,
   reportText,
   sanitizeReport,
   segmentsFor,
@@ -285,4 +286,28 @@ test('damaged video findings do not throw', () => {
   assert.equal(odd.suggestions.pRCA.percent, null);
   assert.equal(odd.suggestions.pRCA.positionMm, null);
   assert.deepEqual(odd.warnings, ['ok']);
+});
+
+test('a report is empty until it says something', () => {
+  assert.ok(isEmptyReport(emptyReport()));
+  // A segment touched and set back to normal says nothing.
+  assert.ok(isEmptyReport(reportWith({ pRCA: grade('0') })));
+  assert.ok(!isEmptyReport(reportWith({ pRCA: grade('1-24') })));
+  assert.ok(!isEmptyReport(reportWith({ pRCA: grade('0', { stent: true }) })));
+  assert.ok(!isEmptyReport(reportWith({ pRCA: grade('0', { suggestion: { grade: '25-49' } }) })));
+  // Dominance and study-level modifiers are content too.
+  assert.ok(!isEmptyReport(reportWith({}, { dominance: 'left' })));
+  assert.ok(!isEmptyReport(reportWith({}, { grafts: true })));
+  assert.ok(!isEmptyReport(reportWith({}, { ischemia: '-' })));
+  assert.ok(!isEmptyReport(reportWith({}, { plaqueBurden: 2 })));
+  const pin = { local: [0, 0, 0], view: { theta: 0, phi: 1, radius: 30, target: [0, 0, 0] }, flipped: false };
+  assert.ok(!isEmptyReport(reportWith({}, { pins: { pRCA: pin } })));
+});
+
+test('when both names of a branch hold something, the one with content survives a dominance change', () => {
+  const r = reportWith({ 'R-PDA': grade('70-99'), 'L-PDA': grade('0') });
+  assert.equal(classify(withDominance(r, 'left')).category, '4A');
+  const suggestionOnly = reportWith({ 'R-PDA': grade('70-99'), 'L-PDA': grade('0', { suggestion: { grade: '25-49' } }) });
+  // Both say something: the segment already filed under the new name stays.
+  assert.equal(withDominance(suggestionOnly, 'left').segments['L-PDA'].suggestion.grade, '25-49');
 });

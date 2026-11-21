@@ -112,6 +112,22 @@ export function emptyReport() {
   };
 }
 
+function isEmptyFinding(finding) {
+  return !finding || (finding.grade === '0' && finding.plaque === 'none' && !finding.stent
+    && !finding.nondiagnostic && !hasHrpFeature(finding) && !finding.suggestion);
+}
+
+/**
+ * Does the report say anything yet? Segments that were touched and set back
+ * to normal do not count; a changed dominance or modifier does.
+ */
+export function isEmptyReport(report) {
+  return Object.values(report.segments).every(isEmptyFinding)
+    && Object.keys(report.pins).length === 0
+    && report.dominance === 'right' && !report.plaqueBurden && !report.ischemia
+    && !report.grafts && !report.exception;
+}
+
 export function segmentsFor(dominance) {
   return SEGMENTS.filter((s) => !s.dominance || s.dominance.includes(dominance));
 }
@@ -167,10 +183,11 @@ export function withDominance(report, dominance) {
     const to = branch[dominance];
     for (const from of new Set(Object.values(branch))) {
       if (from === to) continue;
-      for (const store of [segments, pins]) {
-        if (store[from] && !store[to]) store[to] = store[from];
-        delete store[from];
-      }
+      // If both names somehow hold something, the one that says something wins.
+      if (segments[from] && isEmptyFinding(segments[to])) segments[to] = segments[from];
+      if (pins[from] && !pins[to]) pins[to] = pins[from];
+      delete segments[from];
+      delete pins[from];
     }
   }
   return { ...report, dominance, segments, pins };
@@ -351,7 +368,8 @@ export function suggestionsFromVideoFindings(findings) {
   }
   // A lumen the video could not resolve has no grade, only a lower bound;
   // it outranks any graded lesion in the same segment, since it may be worse.
-  const weight = (s) => (s.unresolved ? Infinity : GRADE_RANK[s.grade]);
+  // (short only of an occlusion).
+  const weight = (s) => (s.unresolved ? GRADE_RANK['100'] - 0.5 : GRADE_RANK[s.grade]);
   const suggestions = {};
   for (const lesion of Array.isArray(findings.lesions) ? findings.lesions : []) {
     if (!lesion || typeof lesion !== 'object' || !SEGMENT_BY_ID[lesion.segment]) continue;

@@ -17,10 +17,13 @@ import {
   emptyReport,
   findingColor,
   findingFor,
+  isEmptyReport,
   isReport,
   sanitizeReport,
   SEGMENTS,
+  segmentUnderDominance,
   suggestionsFromVideoFindings,
+  withDominance,
 } from './utils/cadrads';
 
 const DEFAULT_COLOR = '#cc3333';
@@ -54,10 +57,6 @@ function loadStoredReport(key) {
   } catch {
     return null;
   }
-}
-
-function hasContent(report) {
-  return Object.keys(report.segments).length > 0 || Object.keys(report.pins).length > 0;
 }
 
 export default function App() {
@@ -172,21 +171,26 @@ export default function App() {
       setFileName(file.name);
       setTriCount(tc);
 
-      // The report belongs to the model. Findings typed in before any model
-      // was loaded are the reader's latest word, so they are kept (pins can
-      // only come from this model's own saved report). Otherwise this
-      // model's saved report, if it has one, is restored.
+      // The report belongs to the model: restore the one saved for it.
+      // Findings typed in before any model was loaded carry over to a model
+      // that has no saved report. If both exist, only the reader can say
+      // which to keep, since keeping one discards the other.
       const key = reportStorageKey(e.target.result);
       const stored = loadStoredReport(key);
-      const typedFirst = !reportKeyRef.current && hasContent(reportRef.current);
+      const hasStored = !!stored && !isEmptyReport(stored);
+      const typed = !reportKeyRef.current && !isEmptyReport(reportRef.current) ? reportRef.current : null;
+      const keepTyped = typed && (!hasStored || !window.confirm(
+        'This model already has a saved report.\n\n'
+        + 'OK: open the saved report and discard the findings you just entered.\n'
+        + 'Cancel: keep the findings you just entered and replace the saved report.'
+      ));
       const notes = [];
       let next = emptyReport();
-      if (typedFirst) {
-        next = { ...reportRef.current, pins: stored?.pins || {} };
-        if (stored && Object.keys(stored.segments).length) {
-          notes.push('This model had a saved report. The findings you entered before loading it were kept in its place.');
-        }
-      } else if (stored && hasContent(stored)) {
+      if (keepTyped) {
+        // Pins can only come from this model's own saved report.
+        next = withDominance({ ...typed, pins: stored?.pins || {} }, typed.dominance);
+        if (hasStored) notes.push('The findings you entered before loading were kept; they replace this model\'s saved report.');
+      } else if (hasStored) {
         next = stored;
         notes.push('Restored the report saved for this model in this browser.');
       }
@@ -209,8 +213,8 @@ export default function App() {
   useEffect(() => {
     if (!reportKeyRef.current) return;
     try {
-      if (hasContent(report)) localStorage.setItem(reportKeyRef.current, JSON.stringify(report));
-      else localStorage.removeItem(reportKeyRef.current);
+      if (isEmptyReport(report)) localStorage.removeItem(reportKeyRef.current);
+      else localStorage.setItem(reportKeyRef.current, JSON.stringify(report));
     } catch {
       // Storage can be unavailable (private browsing) or full; the report
       // then simply lasts for this session.
@@ -582,10 +586,15 @@ export default function App() {
           setReportNotes(['That video2stl findings file is damaged and could not be imported.']);
           return;
         }
-        const ids = Object.keys(suggestions);
+        // File each suggestion under the name its segment has in this report's dominance.
+        const dominance = reportRef.current.dominance;
+        const ids = Object.keys(suggestions).map((id) => segmentUnderDominance(id, dominance));
         setReport((r) => {
           const segments = { ...r.segments };
-          for (const id of ids) segments[id] = { ...findingFor(r, id), suggestion: suggestions[id] };
+          for (const [id, suggestion] of Object.entries(suggestions)) {
+            const target = segmentUnderDominance(id, r.dominance);
+            segments[target] = { ...findingFor(r, target), suggestion };
+          }
           return { ...r, segments };
         });
         if (ids.length) setSelectedSegment(ids[0]);
@@ -597,7 +606,10 @@ export default function App() {
         ]);
       } else if (isReport(data)) {
         // Pins belong to the model on screen, not to the imported findings.
-        setReport((r) => ({ ...sanitizeReport(data), pins: r.pins }));
+        setReport((r) => {
+          const imported = sanitizeReport(data);
+          return withDominance({ ...imported, pins: r.pins }, imported.dominance);
+        });
         setReportNotes(['Report imported.']);
       } else {
         setReportNotes(['That file is neither a CathVision report nor a video2stl findings file.']);

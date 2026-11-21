@@ -229,16 +229,42 @@ async function run(profile, context, touch) {
   await page.waitForTimeout(900);
   await shot('5-restored');
 
-  // Findings typed before any model is loaded are kept when one is.
+  // Findings typed before loading a model that already has a saved report:
+  // the reader is asked which to keep, and either answer is honoured.
+  const typeThenLoad = async (answer) => {
+    await page.reload();
+    await page.click('[aria-label="CAD-RADS report"]');
+    await page.locator('.coronary-map [aria-label="Left main"]').dispatchEvent('click');
+    await page.locator('.segment-editor .chip', { hasText: '50–69%' }).click();
+    let asked = false;
+    page.once('dialog', (dialog) => {
+      asked = true;
+      return answer === 'saved' ? dialog.accept() : dialog.dismiss();
+    });
+    await page.setInputFiles('#stl-file-input', args.stl);
+    await page.waitForFunction(() => document.querySelector('.debug-readout')?.textContent.includes('SPACE='));
+    await page.waitForTimeout(200);
+    return asked;
+  };
+  const askedFirst = await typeThenLoad('saved');
+  check(profile, 'choosing the saved report restores it untouched', askedFirst && (await badge()) === 'CAD-RADS 3/P1/N', await badge());
+  const askedAgain = await typeThenLoad('typed');
+  check(profile, 'choosing the typed findings keeps them, with the model\'s pins',
+    askedAgain && (await badge()).startsWith('CAD-RADS 4B')
+    && (await page.locator('.coronary-map').textContent()).includes('◆ mRCA'), await badge());
+
+  // A stray tap that changes nothing must not count as "findings entered".
   await page.reload();
   await page.click('[aria-label="CAD-RADS report"]');
   await page.locator('.coronary-map [aria-label="Left main"]').dispatchEvent('click');
-  await page.locator('.segment-editor .chip', { hasText: '50–69%' }).click();
+  await page.locator('.segment-editor .chip', { hasText: /^0%$/ }).click();
+  let strayAsked = false;
+  page.once('dialog', (dialog) => { strayAsked = true; return dialog.dismiss(); });
   await page.setInputFiles('#stl-file-input', args.stl);
   await page.waitForFunction(() => document.querySelector('.debug-readout')?.textContent.includes('SPACE='));
-  check(profile, 'findings entered before loading a model survive the load',
-    (await badge()).startsWith('CAD-RADS 4B') && (await page.locator('.notice').allTextContents()).join(' ').includes('kept'),
-    await badge());
+  await page.waitForTimeout(200);
+  check(profile, 'a tap that changes nothing does not displace the saved report',
+    !strayAsked && (await badge()).startsWith('CAD-RADS 4B'), await badge());
 
   check(profile, 'no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await page.close();
