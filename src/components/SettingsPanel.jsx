@@ -19,6 +19,10 @@ export default function SettingsPanel({
   onWireframeChange,
   showLabels,
   onShowLabelsChange,
+  stlSpace,
+  hasModel,
+  flipRL,
+  onFlipRLChange,
   activeColor,
   onColorChange,
   labels,
@@ -49,6 +53,19 @@ export default function SettingsPanel({
         <div className="settings-row">
           <span className="settings-row__label">Show Labels</span>
           <Toggle value={showLabels} onChange={onShowLabelsChange} />
+        </div>
+
+        <h3>Orientation</h3>
+        <div className="settings-row">
+          <span className="settings-row__label">Flip R/L</span>
+          <Toggle value={flipRL} onChange={onFlipRLChange} />
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.5 }}>
+          {hasModel
+            ? stlSpace
+              ? `File header: SPACE=${stlSpace} (auto-detected)`
+              : 'No SPACE tag in file — assumed LPS. If the model appears mirrored, use Flip R/L.'
+            : 'Load an STL to detect its coordinate space.'}
         </div>
 
         <h3>Color Theme</h3>
@@ -84,7 +101,9 @@ export default function SettingsPanel({
           )}
           {measurements.map((m) => (
             <div key={m.id} className="item-row">
-              <span style={{ fontFamily: 'var(--font-mono)' }}>{m.distance.toFixed(1)} mm</span>
+              <span style={{ fontFamily: 'var(--font-mono)' }}>
+                {m.estimated ? '~' : ''}{m.distance.toFixed(1)} mm{m.estimated ? ' (scale assumed)' : ''}
+              </span>
               <button className="item-row__delete" onClick={() => onDeleteMeasurement(m.id)}>✕</button>
             </div>
           ))}
