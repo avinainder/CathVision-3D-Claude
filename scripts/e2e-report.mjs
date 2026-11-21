@@ -59,7 +59,7 @@ async function run(profile, context, touch) {
   const shot = async (name) => shots && page.screenshot({ path: path.join(shots, `${profile}-${name}.png`) });
   const tap = (x, y) => (touch ? page.touchscreen.tap(x, y) : page.mouse.click(x, y));
   const size = page.viewportSize();
-  const narrow = size.w <= 760 || size.width <= 760;
+  const narrow = size.width <= 760;
 
   // Points spread over the part of the canvas the panel leaves visible.
   function grid() {
@@ -132,11 +132,33 @@ async function run(profile, context, touch) {
     `${away} -> ${await hud(page)}`);
 
   // Tapping the marker in the 3D view selects its segment.
+  // Tapping near the marker in the 3D view selects its segment: a marker is
+  // only a few pixels wide on a phone, so a tap need not land exactly on it.
   await page.locator('.coronary-map [aria-label="Proximal LAD"]').dispatchEvent('click');
-  if (pinned) await tap(pinned[0], pinned[1]);
+  const off = touch ? 14 : 8;
+  if (pinned) await tap(pinned[0] + off, pinned[1] - off);
   await page.waitForTimeout(150);
-  check(profile, 'tapping a 3D marker selects its segment',
+  check(profile, 'tapping near a 3D marker selects its segment',
     (await page.locator('.segment-editor__title').textContent()).includes('Mid RCA'));
+
+  // Changing dominance must not lose a graded posterior branch.
+  await page.locator('.coronary-map [aria-label="PDA (from RCA)"]').dispatchEvent('click');
+  await page.locator('.segment-editor .chip', { hasText: '70–99%' }).click();
+  await page.locator('.chip', { hasText: /^Left$/ }).click();
+  check(profile, 'a graded PDA follows a change of dominance',
+    (await badge()).startsWith('CAD-RADS 4A') && (await page.locator('.segment-editor__title').textContent()).includes('PDA (from LCx)'),
+    await badge());
+  await page.locator('.segment-editor .chip', { hasText: /^0%$/ }).click();
+  await page.locator('.chip', { hasText: /^Right$/ }).click();
+  await page.locator('.coronary-map [aria-label="Mid RCA"]').dispatchEvent('click');
+  if (narrow) {
+    await page.waitForTimeout(500);
+    check(profile, 'choosing a segment brings its editor into view on a phone', await page.evaluate(() => {
+      const title = document.querySelector('.segment-editor__title').getBoundingClientRect();
+      const body = document.querySelector('.report-panel__body').getBoundingClientRect();
+      return title.top >= body.top - 2 && title.bottom <= body.bottom;
+    }));
+  }
 
   // A drag must orbit, not pin.
   await page.locator('.segment-editor .chip', { hasText: 'Re-pin' }).click();
@@ -189,6 +211,17 @@ async function run(profile, context, touch) {
     (await badge()) === 'CAD-RADS 3/P1' && (await page.locator('.coronary-map').textContent()).includes('◆ mRCA'), await badge());
   await page.waitForTimeout(900);
   await shot('5-restored');
+
+  // Findings typed before any model is loaded are kept when one is.
+  await page.reload();
+  await page.click('[aria-label="CAD-RADS report"]');
+  await page.locator('.coronary-map [aria-label="Left main"]').dispatchEvent('click');
+  await page.locator('.segment-editor .chip', { hasText: '50–69%' }).click();
+  await page.setInputFiles('#stl-file-input', args.stl);
+  await page.waitForFunction(() => document.querySelector('.debug-readout')?.textContent.includes('SPACE='));
+  check(profile, 'findings entered before loading a model survive the load',
+    (await badge()).startsWith('CAD-RADS 4B') && (await page.locator('.notice').allTextContents()).join(' ').includes('kept'),
+    await badge());
 
   check(profile, 'no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await page.close();

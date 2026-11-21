@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import {
   classify,
   DOMINANCE,
@@ -11,7 +11,9 @@ import {
   SEGMENT_VIEWS,
   SEGMENTS,
   segmentsFor,
+  segmentUnderDominance,
   STENOSIS_GRADES,
+  withDominance,
 } from '../utils/cadrads';
 
 // Schematic coronary tree, drawn as on an angiographic diagram: patient's
@@ -154,7 +156,7 @@ function SegmentEditor({
           </div>
           <div className="suggestion__actions">
             <button type="button" className="chip chip--on"
-              onClick={() => onFinding(segment.id, { grade: suggestion.grade, suggestion: null })}>
+              onClick={() => onFinding(segment.id, { grade: suggestion.grade, nondiagnostic: false, suggestion: null })}>
               Use {suggestedGrade.label}
             </button>
             <button type="button" className="chip" onClick={() => onFinding(segment.id, { suggestion: null })}>
@@ -194,7 +196,9 @@ function SegmentEditor({
         </button>
         <button type="button" className={`chip ${finding.nondiagnostic ? 'chip--on' : ''}`}
           aria-pressed={finding.nondiagnostic}
-          onClick={() => onFinding(segment.id, { nondiagnostic: !finding.nondiagnostic })}>
+          onClick={() => onFinding(segment.id, finding.nondiagnostic
+            ? { nondiagnostic: false }
+            : { nondiagnostic: true, grade: '0' })}>
           Non-diagnostic
         </button>
       </div>
@@ -243,12 +247,22 @@ function ReportPanel({
   pinningSegment, onStartPin, onCancelPin, onRemovePin, onFlyToView, onFlyToPin, onImportFile, onClear,
 }) {
   const [tab, setTab] = useState('map');
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState(null);
   const fileInput = useRef(null);
+  const editor = useRef(null);
   const result = useMemo(() => classify(report), [report]);
   const text = useMemo(() => reportText(report), [report]);
-  const segment = SEGMENTS.find((s) => s.id === selected);
-  const pending = segmentsFor(report.dominance).filter((s) => report.segments[s.id]?.suggestion);
+  const active = segmentsFor(report.dominance);
+  const segment = active.find((s) => s.id === selected);
+  const pending = active.filter((s) => report.segments[s.id]?.suggestion);
+
+  // On a phone the sheet is short and the editor sits below the map: bring
+  // it into view when a segment is chosen.
+  useEffect(() => {
+    if (!open || !selected || tab !== 'map') return;
+    if (!window.matchMedia('(max-width: 760px)').matches) return;
+    editor.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }, [open, selected, tab]);
 
   const setFinding = (id, patch) => onChange((r) => ({
     ...r,
@@ -257,19 +271,24 @@ function ReportPanel({
   const set = (patch) => onChange((r) => ({ ...r, ...patch }));
 
   async function copy() {
+    let ok = true;
     try {
       await navigator.clipboard.writeText(text);
     } catch {
       // Clipboard access can be refused (permissions, insecure origin).
       const area = document.createElement('textarea');
       area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
       document.body.appendChild(area);
       area.select();
-      document.execCommand('copy');
+      area.setSelectionRange(0, text.length); // iOS ignores select() alone
+      ok = document.execCommand('copy');
       area.remove();
     }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    setCopyState(ok ? 'Copied' : 'Copy failed — select the text above');
+    setTimeout(() => setCopyState(null), ok ? 1500 : 4000);
   }
 
   function download(name, content, type) {
@@ -278,7 +297,8 @@ function ReportPanel({
     link.href = url;
     link.download = name;
     link.click();
-    URL.revokeObjectURL(url);
+    // Safari abandons the download if the URL is revoked straight away.
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
   }
 
   return (
@@ -327,6 +347,7 @@ function ReportPanel({
               ))}
             </div>
 
+            <div ref={editor} className="report-panel__anchor" />
             {segment ? (
               <SegmentEditor
                 segment={segment}
@@ -345,7 +366,12 @@ function ReportPanel({
             )}
 
             <div className="field-label">Dominance</div>
-            <Chips options={DOMINANCE} value={report.dominance} onPick={(dominance) => set({ dominance })} />
+            <Chips options={DOMINANCE} value={report.dominance}
+              onPick={(dominance) => {
+                // PDA/PLB findings follow the branch to its new parent vessel.
+                onChange((r) => withDominance(r, dominance));
+                if (selected) onSelect(segmentUnderDominance(selected, dominance));
+              }} />
 
             <div className="field-label">
               Plaque burden
@@ -392,7 +418,7 @@ function ReportPanel({
           <>
             <pre className="report-text">{text}</pre>
             <div className="chips">
-              <button type="button" className="chip chip--on" onClick={copy}>{copied ? 'Copied' : 'Copy text'}</button>
+              <button type="button" className="chip chip--on" onClick={copy}>{copyState || 'Copy text'}</button>
               <button type="button" className="chip"
                 onClick={() => download('coronary-cta-report.txt', text, 'text/plain')}>
                 Download .txt
@@ -419,6 +445,10 @@ function ReportPanel({
               Import a report exported here, or a findings file from <code>tools/video2stl</code>.
               Video findings arrive as unverified suggestions and do not change the classification
               until you accept them.
+            </div>
+            <div className="hint">
+              Reports are kept only in this browser, per model, and a browser may clear them.
+              Export what you want to keep.
             </div>
           </>
         )}

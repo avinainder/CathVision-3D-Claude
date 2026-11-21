@@ -6,9 +6,11 @@ import {
   reportText,
   sanitizeReport,
   segmentsFor,
+  segmentUnderDominance,
   suggestionsFromVideoFindings,
   SEGMENTS,
   SEGMENT_VIEWS,
+  withDominance,
 } from '../src/utils/cadrads.js';
 import { computeAngles, presetToSpherical } from '../src/utils/carmAngles.js';
 
@@ -212,4 +214,59 @@ test('sanitizeReport keeps valid content and drops everything else', () => {
   assert.deepEqual(Object.keys(clean.pins), ['pRCA']);
   assert.equal(classify(clean).category, '2');
   assert.deepEqual(sanitizeReport(null), emptyReport());
+});
+
+test('changing dominance carries PDA and PLB findings to the vessel they now arise from', () => {
+  const pin = { local: [1, 2, 3], view: { theta: 0, phi: 1, radius: 30, target: [0, 0, 0] }, flipped: false };
+  const right = reportWith({ 'R-PDA': grade('70-99'), 'R-PLB': grade('25-49') }, { pins: { 'R-PDA': pin } });
+  assert.equal(classify(right).category, '4A');
+
+  const left = withDominance(right, 'left');
+  assert.deepEqual(Object.keys(left.segments).sort(), ['L-PDA', 'L-PLB']);
+  assert.deepEqual(Object.keys(left.pins), ['L-PDA']);
+  assert.equal(classify(left).category, '4A');
+  assert.match(reportText(left), /PDA \(from LCx\): 70–99%/);
+
+  const co = withDominance(left, 'co');
+  assert.deepEqual(Object.keys(co.segments).sort(), ['L-PLB', 'R-PDA']);
+  assert.equal(classify(co).category, '4A');
+
+  assert.deepEqual(withDominance(co, 'right').segments, right.segments);
+  assert.equal(segmentUnderDominance('R-PLB', 'co'), 'L-PLB');
+  assert.equal(segmentUnderDominance('mLAD', 'left'), 'mLAD');
+});
+
+test('sanitizeReport drops findings filed under a segment the dominance does not have', () => {
+  const clean = sanitizeReport({ version: 1, dominance: 'left', segments: { 'R-PDA': { grade: '70-99' } }, pins: {} });
+  assert.deepEqual(Object.keys(clean.segments), ['L-PDA']);
+  assert.equal(classify(clean).category, '4A');
+});
+
+test('a high-risk feature implies plaque, so it cannot sit on CAD-RADS 0', () => {
+  const r = reportWith({ pLAD: grade('0', { hrp: { lowAttenuation: true, napkinRing: true } }) });
+  assert.equal(classify(r).label, 'CAD-RADS 1/P1/HRP');
+  assert.match(reportText(r), /Proximal LAD: plaque without stenosis, high-risk features/);
+});
+
+test('a grade left behind on a non-diagnostic segment counts for nothing', () => {
+  const hidden = reportWith({ mRCA: grade('70-99', { nondiagnostic: true }) });
+  assert.equal(classify(hidden).label, 'CAD-RADS N');
+  assert.equal(classify(hidden).sis, 0);
+  const marked = reportWith({ mRCA: grade('0', { nondiagnostic: true, plaque: 'calcified' }) });
+  assert.equal(classify(marked).label, 'CAD-RADS N/P1');
+});
+
+test('damaged video findings do not throw', () => {
+  const schema = 'cathvision.video2stl.findings/v1';
+  for (const lesions of [5, {}, [null], [{ segment: 'pRCA' }], 'x']) {
+    assert.deepEqual(suggestionsFromVideoFindings({ schema, lesions, warnings: 'x' }), { suggestions: {}, warnings: [] });
+  }
+  const odd = suggestionsFromVideoFindings({
+    schema,
+    lesions: [{ segment: 'pRCA', grade: '25-49', percent_stenosis: 'lots', s_mm: null }],
+    warnings: ['ok', 7],
+  });
+  assert.equal(odd.suggestions.pRCA.percent, null);
+  assert.equal(odd.suggestions.pRCA.positionMm, null);
+  assert.deepEqual(odd.warnings, ['ok']);
 });

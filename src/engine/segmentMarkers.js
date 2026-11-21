@@ -18,7 +18,8 @@ export function createSegmentMarkers() {
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = 'rgba(8,8,13,0.78)';
     ctx.beginPath();
-    ctx.roundRect(0, 0, canvas.width, canvas.height, 14);
+    if (ctx.roundRect) ctx.roundRect(0, 0, canvas.width, canvas.height, 14);
+    else ctx.rect(0, 0, canvas.width, canvas.height); // Safari before 16
     ctx.fill();
     ctx.font = '600 28px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif';
     ctx.fillStyle = '#ffffff';
@@ -88,9 +89,9 @@ export function createSegmentMarkers() {
       clear();
       for (const pin of pins) set(pin.id, pin.local, pin.color, pin.text, pin.selected);
     },
-    /** The tappable objects; each carries userData.segmentId. */
+    /** The tappable objects (none while hidden); each carries userData.segmentId. */
     objects() {
-      return [...markers.values()].map((m) => m.dot);
+      return group.visible ? [...markers.values()].map((m) => m.dot) : [];
     },
     setVisible(visible) {
       group.visible = visible;

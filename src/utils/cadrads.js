@@ -20,6 +20,7 @@ export const STENOSIS_GRADES = [
 export const NONDIAGNOSTIC_COLOR = '#8f93a3';
 
 const GRADE_RANK = Object.fromEntries(STENOSIS_GRADES.map((g, i) => [g.id, i]));
+const isNumber = (v) => typeof v === 'number' && Number.isFinite(v);
 
 export const PLAQUE_TYPES = [
   { id: 'none', label: 'None' },
@@ -129,8 +130,50 @@ export function hasHighRiskPlaque(finding) {
   return HRP_FEATURES.filter((f) => finding.hrp?.[f.id]).length >= 2;
 }
 
+function hasHrpFeature(finding) {
+  return HRP_FEATURES.some((f) => finding.hrp?.[f.id]);
+}
+
+// A stenosis grade, a plaque type or a high-risk feature each mean plaque is
+// there. A non-diagnostic segment has no grade to go by, so only what the
+// reader explicitly marked counts.
 function hasPlaque(finding) {
-  return GRADE_RANK[finding.grade] > 0 || finding.plaque !== 'none';
+  const marked = finding.plaque !== 'none' || hasHrpFeature(finding);
+  return finding.nondiagnostic ? marked : marked || GRADE_RANK[finding.grade] > 0;
+}
+
+// The posterior descending and posterolateral branches come off the RCA or
+// the LCx depending on dominance; each is one segment under two names.
+const POSTERIOR_BRANCHES = [
+  { right: 'R-PDA', co: 'R-PDA', left: 'L-PDA' },
+  { right: 'R-PLB', co: 'L-PLB', left: 'L-PLB' },
+];
+
+/** The id a segment goes by under a dominance pattern. */
+export function segmentUnderDominance(segmentId, dominance) {
+  const branch = POSTERIOR_BRANCHES.find((b) => Object.values(b).includes(segmentId));
+  return branch ? branch[dominance] : segmentId;
+}
+
+/**
+ * Change dominance, carrying PDA/PLB findings and pins over to the segment
+ * that branch becomes. Without this a graded lesion would vanish from the
+ * classification the moment dominance changed.
+ */
+export function withDominance(report, dominance) {
+  const segments = { ...report.segments };
+  const pins = { ...report.pins };
+  for (const branch of POSTERIOR_BRANCHES) {
+    const to = branch[dominance];
+    for (const from of new Set(Object.values(branch))) {
+      if (from === to) continue;
+      for (const store of [segments, pins]) {
+        if (store[from] && !store[to]) store[to] = store[from];
+        delete store[from];
+      }
+    }
+  }
+  return { ...report, dominance, segments, pins };
 }
 
 function isAbnormal(finding) {
@@ -160,6 +203,8 @@ export function classify(report) {
   else if (worst === GRADE_RANK['25-49']) category = '2';
   // Plaque without measurable stenosis is still CAD-RADS 1.
   else if (worst === GRADE_RANK['1-24'] || graded.some((s) => hasPlaque(s.f))) category = '1';
+  // A stent alone stays 0/S: the consensus document grades by stenosis and
+  // sets no floor for a patent stent.
   else category = '0';
 
   const sis = active.filter((s) => hasPlaque(s.f)).length;
@@ -305,20 +350,22 @@ export function suggestionsFromVideoFindings(findings) {
     throw new Error('Not a video2stl findings file');
   }
   const suggestions = {};
-  for (const lesion of findings.lesions || []) {
+  for (const lesion of Array.isArray(findings.lesions) ? findings.lesions : []) {
+    if (!lesion || typeof lesion !== 'object') continue;
     if (!SEGMENT_BY_ID[lesion.segment] || GRADE_RANK[lesion.grade] === undefined) continue;
     const current = suggestions[lesion.segment];
     if (current && GRADE_RANK[current.grade] >= GRADE_RANK[lesion.grade]) continue;
     suggestions[lesion.segment] = {
       source: 'video2stl',
       grade: lesion.grade,
-      percent: lesion.unresolved ? null : lesion.percent_stenosis,
-      positionMm: lesion.s_mm,
+      percent: !lesion.unresolved && isNumber(lesion.percent_stenosis) ? lesion.percent_stenosis : null,
+      positionMm: isNumber(lesion.s_mm) ? lesion.s_mm : null,
       calcified: !!lesion.calcified,
       unresolved: !!lesion.unresolved,
     };
   }
-  return { suggestions, warnings: findings.warnings || [] };
+  const warnings = Array.isArray(findings.warnings) ? findings.warnings.filter((w) => typeof w === 'string') : [];
+  return { suggestions, warnings };
 }
 
 /** Is this a report exported from the panel? */
@@ -326,7 +373,6 @@ export function isReport(value) {
   return !!value && value.version === 1 && typeof value.segments === 'object' && typeof value.dominance === 'string';
 }
 
-const isNumber = (v) => typeof v === 'number' && Number.isFinite(v);
 const isVector = (v) => Array.isArray(v) && v.length === 3 && v.every(isNumber);
 
 /**
@@ -379,5 +425,6 @@ export function sanitizeReport(value) {
       };
     }
   }
-  return report;
+  // Drop anything filed under a segment the dominance does not have.
+  return withDominance(report, report.dominance);
 }

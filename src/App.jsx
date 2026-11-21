@@ -32,16 +32,19 @@ const REPORT_PANEL_WIDTH_PX = 372;
 const REPORT_SHEET_FRACTION = 0.46;
 const FLY_MS = 600;
 
-// Reports are kept per model in this browser only. The key is a hash, so the
-// file name (which may identify a patient) is not itself stored.
-function reportStorageKey(file, triCount) {
-  let hash = 2166136261;
-  const text = `${file.name}:${file.size}:${triCount}`;
-  for (let i = 0; i < text.length; i++) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
+// Reports are kept per model in this browser only. The key is a hash of the
+// file's contents: two different models never share a report however they
+// are named, and no file name (which may identify a patient) is stored.
+function reportStorageKey(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const stride = Math.max(1, Math.floor(bytes.length / 200000));
+  let a = 2166136261;
+  let b = 5381;
+  for (let i = 0; i < bytes.length; i += stride) {
+    a = Math.imul(a ^ bytes[i], 16777619);
+    b = (Math.imul(b, 33) + bytes[i]) | 0;
   }
-  return `cathvision.report.v1:${(hash >>> 0).toString(36)}`;
+  return `cathvision.report.v2:${bytes.length.toString(36)}-${(a >>> 0).toString(36)}-${(b >>> 0).toString(36)}`;
 }
 
 function loadStoredReport(key) {
@@ -121,6 +124,7 @@ export default function App() {
       if (!engine) return;
 
       // Remove existing model
+      cancelAnimationFrame(targetTweenRef.current);
       engine.segmentMarkers.detach();
       if (engine.modelMesh) {
         engine.scene.remove(engine.modelMesh);
@@ -168,18 +172,29 @@ export default function App() {
       setFileName(file.name);
       setTriCount(tc);
 
-      // The report belongs to the model. Restore this model's report; if it
-      // has none, keep findings entered before any model was loaded, without
-      // their pins (those point into a different mesh).
-      const key = reportStorageKey(file, tc);
-      const carried = !reportKeyRef.current && hasContent(reportRef.current)
-        ? { ...reportRef.current, pins: {} }
-        : emptyReport();
+      // The report belongs to the model. Findings typed in before any model
+      // was loaded are the reader's latest word, so they are kept (pins can
+      // only come from this model's own saved report). Otherwise this
+      // model's saved report, if it has one, is restored.
+      const key = reportStorageKey(e.target.result);
+      const stored = loadStoredReport(key);
+      const typedFirst = !reportKeyRef.current && hasContent(reportRef.current);
+      const notes = [];
+      let next = emptyReport();
+      if (typedFirst) {
+        next = { ...reportRef.current, pins: stored?.pins || {} };
+        if (stored && Object.keys(stored.segments).length) {
+          notes.push('This model had a saved report. The findings you entered before loading it were kept in its place.');
+        }
+      } else if (stored && hasContent(stored)) {
+        next = stored;
+        notes.push('Restored the report saved for this model in this browser.');
+      }
       reportKeyRef.current = key;
-      setReport(loadStoredReport(key) || carried);
+      setReport(next);
       setSelectedSegment(null);
       setPinningSegment(null);
-      setReportNotes([]);
+      setReportNotes(notes);
       setActiveTool(null);
 
       // Reset camera
@@ -194,7 +209,8 @@ export default function App() {
   useEffect(() => {
     if (!reportKeyRef.current) return;
     try {
-      localStorage.setItem(reportKeyRef.current, JSON.stringify(report));
+      if (hasContent(report)) localStorage.setItem(reportKeyRef.current, JSON.stringify(report));
+      else localStorage.removeItem(reportKeyRef.current);
     } catch {
       // Storage can be unavailable (private browsing) or full; the report
       // then simply lasts for this session.
@@ -331,10 +347,13 @@ export default function App() {
     const engine = engineRef.current;
     if (!engine) return;
     const ctrl = engine.controller;
-    // The controller takes the short way round only from within one turn.
-    ctrl.state.theta = Math.atan2(Math.sin(ctrl.state.theta), Math.cos(ctrl.state.theta));
-    cancelAnimationFrame(targetTweenRef.current);
+    // The controller takes the short way round only when both angles lie
+    // within one turn of each other.
+    const wrap = (angle) => Math.atan2(Math.sin(angle), Math.cos(angle));
+    ctrl.state.theta = wrap(ctrl.state.theta);
+    theta = wrap(theta);
     if (target) {
+      cancelAnimationFrame(targetTweenRef.current);
       const from = ctrl.state.target.clone();
       const to = new THREE.Vector3().fromArray(target);
       const started = performance.now();
@@ -370,6 +389,7 @@ export default function App() {
   const handleResetView = useCallback(() => {
     const engine = engineRef.current;
     if (!engine) return;
+    cancelAnimationFrame(targetTweenRef.current);
     engine.controller.resetTarget();
     engine.controller.animateTo(0, Math.PI / 3, 30);
   }, []);
@@ -554,7 +574,14 @@ export default function App() {
         return;
       }
       if (data?.schema === 'cathvision.video2stl.findings/v1') {
-        const { suggestions, warnings } = suggestionsFromVideoFindings(data);
+        let suggestions;
+        let warnings;
+        try {
+          ({ suggestions, warnings } = suggestionsFromVideoFindings(data));
+        } catch {
+          setReportNotes(['That video2stl findings file is damaged and could not be imported.']);
+          return;
+        }
         const ids = Object.keys(suggestions);
         setReport((r) => {
           const segments = { ...r.segments };

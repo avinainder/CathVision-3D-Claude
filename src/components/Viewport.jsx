@@ -9,6 +9,9 @@ import { computeAngles } from '../utils/carmAngles';
 
 const TAP_MAX_MOVE_PX = 8;
 const TAP_MAX_MS = 600;
+// How close a tap must land to a segment marker to pick it. Markers are only
+// a few pixels wide on a phone, so they are picked by distance on screen.
+const MARKER_REACH_PX = { touch: 24, mouse: 12 };
 
 /**
  * The 3D canvas.
@@ -68,9 +71,9 @@ export default function Viewport({
       if (!w || !h) return;
       renderer.setSize(w, h, false);
       const { right = 0, bottom = 0 } = props.current.inset || {};
-      // The view is framed by its height, so when a panel takes height away
-      // the picture shrinks with it and still fits what is left.
-      camera.zoom = (h - bottom) / h;
+      // The view is framed by its height. When a panel takes height away, or
+      // leaves a strip narrower than the picture, shrink it to fit what is left.
+      camera.zoom = Math.min(1, (h - bottom) / h, right ? (w - right) / Math.min(w, h) : 1);
       if (right || bottom) {
         camera.setViewOffset(w, h, right / 2, bottom / 2, w, h);
       } else {
@@ -109,7 +112,21 @@ export default function Viewport({
     const active = new Set();
     let press = null;
 
-    function handleTap(clientX, clientY) {
+    const projected = new THREE.Vector3();
+    function markerNear(clientX, clientY, rect, reach) {
+      let best = null;
+      for (const object of engine.segmentMarkers.objects()) {
+        object.getWorldPosition(projected).project(camera);
+        if (projected.z > 1) continue; // behind the camera
+        const x = rect.left + (projected.x * 0.5 + 0.5) * rect.width;
+        const y = rect.top + (-projected.y * 0.5 + 0.5) * rect.height;
+        const distance = Math.hypot(x - clientX, y - clientY);
+        if (distance <= reach && (!best || distance < best.distance)) best = { object, distance };
+      }
+      return best?.object;
+    }
+
+    function handleTap(clientX, clientY, pointerType) {
       const rect = canvas.getBoundingClientRect();
       pointer.set(
         ((clientX - rect.left) / rect.width) * 2 - 1,
@@ -121,8 +138,9 @@ export default function Viewport({
       const { activeTool: tool, onMarkerTap: markerTap, ...on } = props.current;
 
       if (!tool) {
-        const marker = engine.raycaster.intersectObjects(engine.segmentMarkers.objects(), false)[0];
-        if (marker) markerTap?.(marker.object.userData.segmentId);
+        const reach = pointerType === 'mouse' ? MARKER_REACH_PX.mouse : MARKER_REACH_PX.touch;
+        const marker = markerNear(clientX, clientY, rect, reach);
+        if (marker) markerTap?.(marker.userData.segmentId);
         return;
       }
 
@@ -155,7 +173,7 @@ export default function Viewport({
       if (!start || start.id !== e.pointerId) return;
       const moved = Math.hypot(e.clientX - start.x, e.clientY - start.y);
       if (moved <= TAP_MAX_MOVE_PX && performance.now() - start.at <= TAP_MAX_MS) {
-        handleTap(e.clientX, e.clientY);
+        handleTap(e.clientX, e.clientY, e.pointerType);
       }
     }
 
