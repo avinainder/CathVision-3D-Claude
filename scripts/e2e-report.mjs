@@ -152,12 +152,13 @@ async function run(profile, context, touch) {
   await page.locator('.chip', { hasText: /^Right$/ }).click();
   await page.locator('.coronary-map [aria-label="Mid RCA"]').dispatchEvent('click');
   if (narrow) {
-    await page.waitForTimeout(500);
-    check(profile, 'choosing a segment brings its editor into view on a phone', await page.evaluate(() => {
+    // The sheet scrolls smoothly, so wait for it to settle rather than for a fixed time.
+    const inView = await page.waitForFunction(() => {
       const title = document.querySelector('.segment-editor__title').getBoundingClientRect();
       const body = document.querySelector('.report-panel__body').getBoundingClientRect();
       return title.top >= body.top - 2 && title.bottom <= body.bottom;
-    }));
+    }, null, { timeout: 3000 }).then(() => true, () => false);
+    check(profile, 'choosing a segment brings its editor into view on a phone', inView);
   }
 
   // A drag must orbit, not pin.
