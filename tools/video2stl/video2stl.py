@@ -28,10 +28,23 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 from skimage import measure
-from skimage.filters import threshold_multiotsu
+from skimage.filters import threshold_multiotsu, threshold_otsu
 from skimage.graph import MCP_Geometric
 
 FULL = np.ones((3, 3, 3), bool)
+# The CT image is reduced to at most this many pixels a side before analysis,
+# so behaviour (and memory) does not depend on how large the video was saved.
+WORKING_SIZE = 256
+# A coronary artery is never a large fraction of the image; a bright
+# structure thicker than this is a chamber or the aorta.
+MAX_VESSEL_RADIUS_FRACTION = 0.08
+LESION_MIN_PERCENT = 15.0
+END_TRIM_MM = 4.0
+# Smoothing along the vessel, in centerline samples (half a pixel each): of
+# the sampled image before fitting, and of the fitted diameters after.
+RAY_SMOOTH = 1.0
+PROFILE_MEDIAN = 3
+PROFILE_SMOOTH = 1.0
 DISCLAIMER = ("Estimated geometry from a compressed video. Educational demonstration only - "
               "not a measurement, not a diagnosis.")
 
@@ -57,7 +70,10 @@ def read_video(path):
     raw = b""
     for timing in (["-fps_mode", "passthrough"], ["-vsync", "0"]):
         done = subprocess.run(
-            ["ffmpeg", "-v", "error", "-i", path, *timing, "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+            # -noautorotate: decode at the coded size ffprobe reported, even
+            # if the file carries a rotation flag.
+            ["ffmpeg", "-v", "error", "-noautorotate", "-i", path, *timing,
+             "-f", "rawvideo", "-pix_fmt", "gray", "-"],
             capture_output=True)
         if done.returncode == 0:
             raw = done.stdout
@@ -71,14 +87,23 @@ def read_video(path):
 def drop_duplicate_frames(frames):
     """Remove repeated frames (a capture often holds each slice for several).
 
+    Frame-to-frame change is either a new slice (large) or compression
+    flicker on a repeated one (small). Frames are dropped only when those two
+    groups are clearly separate; otherwise every frame is kept.
     Returns the kept frames and their original indices.
     """
     sub = frames[:, ::2, ::2].astype(np.int16)
     diff = np.abs(np.diff(sub, axis=0)).mean(axis=(1, 2))
-    moving = diff[diff > 0]
-    if moving.size == 0:
+    if not (diff > 0).any():
         raise PipelineError("every frame is identical; this is not a sweep")
-    keep = np.concatenate([[True], diff > 0.3 * np.median(moving)])
+    keep = np.ones(len(diff), bool)
+    log_diff = np.log(diff + 1e-3)
+    if log_diff.max() - log_diff.min() > np.log(3):
+        repeated = log_diff < threshold_otsu(log_diff)
+        if repeated.any() and not repeated.all() \
+                and np.median(diff[~repeated]) >= 3 * max(np.median(diff[repeated]), 1e-3):
+            keep = ~repeated
+    keep = np.concatenate([[True], keep])
     return frames[keep], np.flatnonzero(keep)
 
 
@@ -105,8 +130,15 @@ def detect_image_box(frames):
 
 def intensity_classes(vol):
     """Three-class split of the smoothed volume: dark (fat/air), soft tissue,
-    contrast. Returns (bright threshold, dark level, soft-tissue level)."""
-    sample = vol[::2, ::2, ::2].ravel()
+    contrast. Returns (bright threshold, dark level, soft-tissue level).
+
+    Refuses images with no contrast-filled structures: a three-way split can
+    always be computed, even on noise, so the classes must also stand clearly
+    apart.
+    """
+    sample = vol[::2, ::2, ::2]
+    noise = 1.4826 * np.median(np.abs(sample - ndimage.gaussian_filter(sample, 2.0)))
+    sample = sample.ravel()
     try:
         t_low, t_high = threshold_multiotsu(sample, classes=3)
     except ValueError as exc:
@@ -115,6 +147,11 @@ def intensity_classes(vol):
     dark = float(np.median(low)) if low.size else float(sample.min())
     middle = sample[(sample > t_low) & (sample < t_high)]
     tissue = float(np.median(middle)) if middle.size else 0.5 * (t_low + t_high)
+    high = sample[sample >= t_high]
+    contrast = float(np.median(high)) if high.size else tissue
+    if contrast - tissue < max(25.0, 8.0 * noise):
+        raise PipelineError("no contrast-filled structures found: nothing in the image is clearly "
+                            "brighter than soft tissue")
     return float(t_high), dark, tissue
 
 
@@ -135,11 +172,15 @@ def pick_vessel(bright, dt, seed=None):
     component over a range of candidate vessel radii.
     Returns (vessel mask, thick-structure mask, all thin structures).
     """
+    max_radius = MAX_VESSEL_RADIUS_FRACTION * min(bright.shape[1:])
     if seed is not None:
         z, y, x = seed
         near = (slice(max(z - 3, 0), z + 4), slice(max(y - 6, 0), y + 7), slice(max(x - 6, 0), x + 7))
         if not bright[near].any():
             raise PipelineError("no contrast-filled structure at the seed point")
+        if dt[near].max() > max_radius:
+            raise PipelineError("the structure at the seed is too thick to be a coronary artery "
+                                "(is the seed in a chamber or the aorta?)")
         radius = int(np.ceil(1.8 * dt[near].max() + 1))
         thin, thick = remove_thick(bright, dt, radius)
         labels, _ = ndimage.label(thin, FULL)
@@ -150,6 +191,8 @@ def pick_vessel(bright, dt, seed=None):
 
     best = None
     for radius in (2, 3, 4, 6, 8, 11, 15, 20):
+        if radius > max(max_radius, 4):
+            break
         thin, thick = remove_thick(bright, dt, radius)
         labels, n = ndimage.label(thin, FULL)
         if n == 0:
@@ -174,24 +217,29 @@ def pick_vessel(bright, dt, seed=None):
     return best[1], best[2], best[3]
 
 
-def bridge_gaps(mask, thin, vol, lumen_level, dark_level):
+def bridge_gaps(mask, thin, thick, vol, lumen_level, dark_level):
     """Reconnect the vessel across stretches too narrow to threshold.
 
     A tight stenosis can dim the lumen until the trace simply stops there,
     which would report a short, healthy vessel and miss the lesion entirely.
-    From each end of the trace, look ahead for another thin bright structure
-    in line with the vessel and join it along the brightest route, so the
-    narrowing gets measured. Returns (mask, bridge locations).
+    From each free end of the trace, look ahead for another thin bright
+    structure in line with the vessel and join it along the brightest route,
+    so the narrowing gets measured. An end that sits on a thick structure
+    (the ostium) is where the vessel starts, not a gap, and is left alone.
+    Returns (mask, bridge locations).
     """
     mask = mask.copy()
     labels, _ = ndimage.label(thin & ~ndimage.binary_dilation(mask, FULL), FULL)
     reach = 10 * 3.0 * ndimage.distance_transform_edt(mask)[mask].mean() + 6
+    to_thick = ndimage.distance_transform_edt(~thick) if thick.any() else None
     shape = np.array(mask.shape)
     bridges = []
     for _ in range(4):
         path = trace_centerline(mask)
         grew = False
         for end, inner in ((path[0], path[min(12, len(path) - 1)]), (path[-1], path[max(len(path) - 13, 0)])):
+            if to_thick is not None and to_thick[tuple(end.astype(int))] <= 4:
+                continue
             heading = end - inner
             heading /= np.linalg.norm(heading) + 1e-9
             candidates = np.argwhere(labels > 0)
@@ -273,8 +321,7 @@ def estimate_z_ratio(mask, path):
     describe the same circle, which fixes the ratio. Vessel portions that run
     straight through the slices carry no information and are ignored.
 
-    Returns (ratio, confidence 0..1), or (None, 0) if the vessel never runs
-    obliquely enough to tell.
+    Returns the ratio, or None if the vessel never runs in-plane enough to tell.
     """
     coords = np.argwhere(mask).astype(float)  # z, y, x
     _, nearest = cKDTree(path).query(coords)
@@ -295,7 +342,7 @@ def estimate_z_ratio(mask, path):
             continue
         covs.append(np.cov(pts.T))
     if len(covs) < 3:
-        return None, 0.0
+        return None
 
     ratios = np.exp(np.linspace(np.log(0.25), np.log(4.0), 121))
     cost = np.zeros_like(ratios)
@@ -306,8 +353,8 @@ def estimate_z_ratio(mask, path):
             cost[i] += min(np.log(ev[1] / ev[0]) ** 2, 1.0)
     best = int(np.argmin(cost))
     if best in (0, len(ratios) - 1):
-        return None, 0.0
-    return float(ratios[best]), float(np.clip(len(covs) / 12.0, 0, 1))
+        return None
+    return float(ratios[best])
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +438,7 @@ def measure_profile(vol, path, r_max, lumen_level, dark_level, wall_level, calci
     dirs = np.cos(theta)[None, :, None] * u[:, None, :] + np.sin(theta)[None, :, None] * v[:, None, :]
     pts = path[:, None, None, :] + r[None, None, :, None] * dirs[:, :, None, :]
     p = ndimage.map_coordinates(vol, pts.reshape(-1, 3).T, order=1, mode="nearest")
-    p = ndimage.gaussian_filter1d(p.reshape(len(path), n_rays, len(r)), 1.5, axis=0, mode="nearest")
+    p = ndimage.gaussian_filter1d(p.reshape(len(path), n_rays, len(r)), RAY_SMOOTH, axis=0, mode="nearest")
     smooth = ndimage.gaussian_filter1d(p, 1.0, axis=2, mode="nearest")
     span = lumen_level - dark_level
 
@@ -405,14 +452,23 @@ def measure_profile(vol, path, r_max, lumen_level, dark_level, wall_level, calci
     ray_bg = np.take_along_axis(smooth, i_bg[..., None], axis=2)[..., 0]
     leaves_lumen = ray_bg < lumen_level - 0.3 * span
 
-    # Calcium blooms: its blurred halo passes through lumen-like intensities.
     calc = smooth > calcium_level
-    near_calcium = calc.any(axis=2) & (calc.argmax(axis=2) <= i_bg)
-    bloom = near_calcium.copy()
+    first_calc = np.where(calc.any(axis=2), calc.argmax(axis=2), 10 * len(r))
+    # Calcium blooms: its blurred halo passes through lumen-like intensities,
+    # so a ray that meets calcium before reaching background over-reads.
+    # Leave such rays out, with their neighbours.
+    before_background = first_calc <= i_bg
+    bloom = before_background.copy()
     for shift in (-2, -1, 1, 2):
-        bloom |= np.roll(near_calcium, shift, axis=1)
+        bloom |= np.roll(before_background, shift, axis=1)
+    # Calcium in or just outside the wall (the ray dips through plaque or fat
+    # and then climbs into it) marks the cross-section as calcified without
+    # disturbing the lumen estimate.
+    calcified = (first_calc <= np.minimum(i_far, i_bg + 8) + 4).any(axis=1)
     clean = leaves_lumen & ~bloom
     enough = clean.mean(axis=1) >= 0.4
+    if not enough.any():
+        raise PipelineError("the lumen could not be measured anywhere along the trace")
 
     with np.errstate(all="ignore"):
         counts = np.maximum(clean.sum(axis=1), 1)
@@ -426,7 +482,9 @@ def measure_profile(vol, path, r_max, lumen_level, dark_level, wall_level, calci
     # Blur: the sigma under which single discs best explain the widest planes.
     radii = np.arange(0, r_max + 0.25, 0.25)
     excess = ((profile - background[:, None]) * weight * r).sum(axis=1)
-    healthy = enough & (excess >= np.percentile(excess[enough], 70)) & ~near_calcium.any(axis=1)
+    healthy = enough & (excess >= np.percentile(excess[enough], 70)) & ~before_background.any(axis=1)
+    if not healthy.any():
+        healthy = enough
     best = None
     for sigma in (0.5, 0.7, 0.9, 1.1, 1.3, 1.6, 2.0, 2.5):
         table = disc_profiles(radii, r, sigma)
@@ -447,7 +505,7 @@ def measure_profile(vol, path, r_max, lumen_level, dark_level, wall_level, calci
     lumen[~enough & (p[:, :, 0].mean(axis=1) < lumen_level - 0.5 * span)] = 0.0
 
     strip = np.concatenate([smooth[:, n_rays // 2, ::-1], smooth[:, 0, 1:]], axis=1)
-    return lumen, outer, near_calcium.any(axis=1), strip, {"blur_sigma_px": sigma}
+    return lumen, outer, calcified, strip, {"blur_sigma_px": sigma}
 
 
 def fill_gaps(values):
@@ -476,9 +534,13 @@ def stenosis_grade(percent):
     return "100"
 
 
-def find_lesions(s_mm, diameter_mm, reference_mm, calcified, resolution_mm, trim_mm=4.0,
-                 min_percent=15.0, min_length_mm=1.5, merge_mm=2.0):
-    """Stretches where the lumen falls at least `min_percent` below reference."""
+def find_lesions(s_mm, diameter_mm, reference_mm, calcified, resolution_mm, trim_mm=END_TRIM_MM,
+                 min_percent=LESION_MIN_PERCENT, min_length_mm=1.5, merge_mm=2.0):
+    """Stretches where the lumen falls at least `min_percent` below reference.
+
+    The first and last `trim_mm` are not examined: the trace starts and ends
+    raggedly, so a narrowing there cannot be told from the vessel's end.
+    """
     percent = 100 * (1 - diameter_mm / reference_mm)
     flag = (percent >= min_percent) & (s_mm >= trim_mm) & (s_mm <= s_mm[-1] - trim_mm)
     runs, start = [], None
@@ -499,8 +561,9 @@ def find_lesions(s_mm, diameter_mm, reference_mm, calcified, resolution_mm, trim
             continue
         worst = a + int(np.argmax(percent[a:b]))
         pct = float(percent[worst])
-        # Below the resolving power of the video a lumen cannot be sized:
-        # it may be a tight stenosis or an occlusion.
+        # Below the resolving power of the video a lumen cannot be sized. All
+        # that can be said is that it is narrower than the smallest lumen the
+        # video could show: a lower bound on the stenosis, with no upper one.
         unresolved = bool(diameter_mm[worst] < resolution_mm)
         lesions.append({
             "s_mm": round(float(s_mm[worst]), 1),
@@ -510,7 +573,8 @@ def find_lesions(s_mm, diameter_mm, reference_mm, calcified, resolution_mm, trim
             "min_diameter_mm": None if unresolved else round(float(diameter_mm[worst]), 2),
             "reference_diameter_mm": round(float(reference_mm[worst]), 2),
             "percent_stenosis": None if unresolved else round(pct),
-            "grade": "70-99" if unresolved else stenosis_grade(pct),
+            "percent_at_least": max(0, round(100 * (1 - resolution_mm / float(reference_mm[worst])))) if unresolved else None,
+            "grade": None if unresolved else stenosis_grade(pct),
             "unresolved": unresolved,
             "calcified": bool(np.any(calcified[a:b])),
         })
@@ -521,14 +585,34 @@ def find_lesions(s_mm, diameter_mm, reference_mm, calcified, resolution_mm, trim
 # Output
 # ---------------------------------------------------------------------------
 
-def mesh_lps(mask, origin_zyx, voxel_mm, superior_to_inferior):
-    """Marching-cubes surface in patient LPS millimetres.
+def tube_field(shape, path, diameter):
+    """A field that is positive inside a tube whose radius follows the
+    measured lumen along the centerline; the surface is its zero level.
+
+    The model is built from the measurements rather than from the
+    segmentation mask, so what is drawn is what is reported. A lumen too
+    narrow to measure is drawn as a thread.
+    """
+    radius = np.maximum(diameter / 2.0, 0.8)
+    off_path = np.ones(shape, bool)
+    cells = np.clip(np.round(path).astype(int), 0, np.array(shape) - 1)
+    off_path[tuple(cells.T)] = False
+    near = np.argwhere(ndimage.distance_transform_edt(off_path) <= radius.max() + 2.5)
+    dist, nearest = cKDTree(path).query(near)
+    field = np.full(shape, -2.5, np.float32)
+    field[tuple(near.T)] = np.maximum(radius[nearest] - dist, -2.5)
+    return ndimage.gaussian_filter(field, 0.5)
+
+
+def mesh_lps(field, origin_zyx, voxel_mm, superior_to_inferior):
+    """Zero-level surface of `field` in patient LPS millimetres.
 
     Axial images are displayed viewed from the feet: image x → patient Left,
     image y → Posterior. Frame order gives Superior/Inferior.
     """
-    field = ndimage.gaussian_filter(np.pad(mask, 2).astype(np.float32), 1.0)
-    verts, faces, _, _ = measure.marching_cubes(field, 0.5)
+    if field.max() <= 0:
+        raise PipelineError("the traced vessel is too thin to build a model from")
+    verts, faces, _, _ = measure.marching_cubes(np.pad(field, 2, constant_values=-2.5), 0.0)
     verts = verts - 2 + np.asarray(origin_zyx)
     z, y, x = verts.T * voxel_mm
     lps = np.column_stack([x, y, -z if superior_to_inferior else z]).astype(np.float32)
@@ -610,25 +694,45 @@ SEGMENT_THIRDS = {
 
 
 def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, seed=None,
-        crop=None, frames=None, sweep="auto", reverse=False, vessel="RCA", log=print):
+        crop=None, frames=None, sweep="auto", reverse=False, vessel=None, log=print):
     """Run the whole pipeline. Returns findings, mesh and QA data."""
     stack = read_video(video)
-    total_frames = len(stack)
+    total_frames, frame_h, frame_w = stack.shape
     first = 0
     if frames:
         first, last = frames
+        if not 0 <= first < last:
+            raise PipelineError("--frames needs START < END")
         stack = stack[first:last]
+        if len(stack) < 8:
+            raise PipelineError("the frame range holds too few frames")
     stack, kept = drop_duplicate_frames(stack)
     kept = kept + first
-    box = crop or detect_image_box(stack)
+    if crop:
+        x0, y0, w, h = crop
+        if min(w, h) < 16 or x0 < 0 or y0 < 0 or x0 + w > frame_w or y0 + h > frame_h:
+            raise PipelineError(f"--crop must lie inside the {frame_w}x{frame_h} frame and be at least 16 px each way")
+        box = tuple(crop)
+    else:
+        box = detect_image_box(stack)
     x0, y0, w, h = box
-    vol_raw = stack[:, y0:y0 + h, x0:x0 + w].astype(np.float32)
-    log(f"volume: {len(stack)} slices of {w}x{h} px ({total_frames} frames in video)")
     if len(stack) < 20:
         raise PipelineError("too few distinct slices to build a volume")
+    warnings = []
+
+    # Analyse at a bounded working resolution, whatever size the video is.
+    shrink = max(1, int(np.ceil(max(w, h) / WORKING_SIZE)))
+    region = stack[:, y0:y0 + h, x0:x0 + w]
+    if shrink > 1:
+        hh, ww = (h // shrink) * shrink, (w // shrink) * shrink
+        vol_raw = region[:, :hh, :ww].reshape(len(region), hh // shrink, shrink, ww // shrink, shrink)
+        vol_raw = vol_raw.mean(axis=(2, 4), dtype=np.float32)
+    else:
+        vol_raw = region.astype(np.float32)
+    log(f"volume: {len(stack)} slices of {w}x{h} px ({total_frames} frames in video)"
+        + (f", analysed at 1/{shrink} size" if shrink > 1 else ""))
     if fov_mm and not pixel_mm:
         pixel_mm = fov_mm / w
-    warnings = []
 
     vol_seg = ndimage.gaussian_filter(vol_raw, (0.7, 1.0, 1.0))
     bright_level, dark_level, wall_level = intensity_classes(vol_seg)
@@ -638,10 +742,14 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
     seed_zyx = None
     if seed is not None:
         sx, sy, sf = seed
-        seed_zyx = (int(np.argmin(np.abs(kept - sf))), int(sy - y0), int(sx - x0))
+        if not (x0 <= sx < x0 + w and y0 <= sy < y0 + h and kept[0] <= sf <= kept[-1]):
+            raise PipelineError("--seed lies outside the CT image region or the frames in use "
+                                f"(image x {x0}-{x0 + w - 1}, y {y0}-{y0 + h - 1}, frames {kept[0]}-{kept[-1]})")
+        seed_zyx = (int(np.argmin(np.abs(kept - sf))),
+                    min((sy - y0) // shrink, vol_raw.shape[1] - 1), min((sx - x0) // shrink, vol_raw.shape[2] - 1))
     mask, thick, thin = pick_vessel(bright, dt, seed_zyx)
     core = mask & (dt >= np.percentile(dt[mask], 60))
-    mask, bridges = bridge_gaps(mask, thin, vol_seg, float(np.median(vol_seg[core])), dark_level)
+    mask, bridges = bridge_gaps(mask, thin, thick, vol_seg, float(np.median(vol_seg[core])), dark_level)
     mask = ndimage.binary_fill_holes(mask)
     radius = 3.0 * float(ndimage.distance_transform_edt(mask)[mask].mean())
     log(f"vessel: {int(mask.sum())} voxels, radius about {radius:.1f} px"
@@ -657,18 +765,20 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
     mask, thick = mask[roi], thick[roi]
     vol_meas = ndimage.gaussian_filter(vol_raw, 0.4)[roi]
 
-    z_source, z_confidence = "user", 1.0
+    z_source = "user"
     if z_ratio is None:
-        z_ratio, z_confidence = estimate_z_ratio(mask, trace_centerline(mask))
+        z_ratio = estimate_z_ratio(mask, trace_centerline(mask))
         z_source = "estimated from vessel shape"
         if z_ratio is None:
             z_ratio, z_source = 1.0, "assumed"
             warnings.append("Slice spacing could not be estimated (the vessel never runs in-plane); "
                             "1.0 x pixel size was assumed. Lengths along the scan axis are unreliable. "
                             "Pass --z-ratio if you know it.")
-    log(f"slice spacing / pixel size: {z_ratio:.2f} ({z_source})")
+    else:
+        z_ratio = z_ratio / shrink      # given per video pixel; the working pixel is larger
+    log(f"slice spacing / pixel size: {z_ratio * shrink:.2f} ({z_source})")
 
-    # Resample to cubic voxels one pixel on a side.
+    # Resample to cubic voxels one working pixel on a side.
     zoom = (z_ratio, 1, 1)
     vol_iso = ndimage.zoom(vol_meas, zoom, order=1)
     mask_iso = ndimage.zoom(mask.astype(np.float32), zoom, order=1) > 0.5
@@ -692,30 +802,37 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
     raw_diameter, _, calcified, strip, fit_info = measure_profile(
         vol_iso, path, r_max, lumen_level, dark_level, wall_level, calcium_level)
     diameter_px = ndimage.gaussian_filter1d(
-        ndimage.median_filter(fill_gaps(raw_diameter), 5, mode="nearest"), 2.0)
+        ndimage.median_filter(fill_gaps(raw_diameter), PROFILE_MEDIAN, mode="nearest"), PROFILE_SMOOTH)
 
-    # Proximal end: where the vessel leaves a thick structure (the aorta),
-    # otherwise the wider end.
+    # Which end is proximal. The trace is trusted to start at the aorta only
+    # when exactly one end sits on a thick structure and that end is not the
+    # narrower one; a chamber lying beside the distal vessel fails that test.
     sixth = max(len(path) // 6, 4)
-    wider_at_end = diameter_px[-sixth:].mean() > diameter_px[:sixth].mean()
-    proximal_known = False
-    flip = wider_at_end
+    first_d, last_d = float(diameter_px[:sixth].mean()), float(diameter_px[-sixth:].mean())
+    flip, proximal_known = last_d > first_d, False
+    proximal_source = "the wider end (assumed)"
     if thick_iso.any():
         gap = ndimage.distance_transform_edt(~thick_iso)
-        d0, d1 = (float(ndimage.map_coordinates(gap, p[:, None], order=1)[0]) for p in (path[0], path[-1]))
-        if min(d0, d1) < 3 * radius + 4:
-            proximal_known, flip = True, d1 < d0
-    if flip != reverse:
+        on_thick = [float(ndimage.map_coordinates(gap, p[:, None], order=1)[0]) <= 4.0 for p in (path[0], path[-1])]
+        if on_thick[0] != on_thick[1]:
+            at_last = on_thick[1]
+            narrower = (last_d < 0.85 * first_d) if at_last else (first_d < 0.85 * last_d)
+            if not narrower:
+                flip, proximal_known = at_last, True
+                proximal_source = "the end arising from a thick structure (taken as the aorta)"
+    if reverse:
+        flip, proximal_known, proximal_source = not flip, True, "user (--reverse)"
+    if flip:
         path, diameter_px, calcified, strip = path[::-1], diameter_px[::-1], calcified[::-1], strip[::-1]
     if not proximal_known:
-        warnings.append("The vessel origin was not found; the wider end was taken as proximal. "
+        warnings.append("The vessel origin was not identified; the wider end was taken as proximal. "
                         "Use --reverse if that is wrong.")
 
     # Sweep direction: a coronary ostium lies superior to the rest of the vessel.
     if sweep == "auto":
         z_origin, z_rest = path[:sixth, 0].mean(), path[:, 0].mean()
         if proximal_known and abs(z_rest - z_origin) > 2 * radius:
-            superior_to_inferior = z_origin < z_rest
+            superior_to_inferior = bool(z_origin < z_rest)
             sweep_source = "inferred (the ostium lies superior to the vessel)"
         else:
             superior_to_inferior, sweep_source = True, "assumed"
@@ -727,23 +844,28 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
     s_px = np.arange(len(path)) * 0.5
     reference_px = reference_curve(s_px, diameter_px, window=8 * np.median(diameter_px))
     if pixel_mm:
-        px_mm, scale_source = float(pixel_mm), "user"
+        px_mm, scale_source = float(pixel_mm) * shrink, "user"
     else:
         px_mm = ref_diameter_mm / float(reference_px[: max(4, len(path) // 10)].mean())
         scale_source = "assumed reference diameter"
     s_mm, diameter_mm, reference_mm = s_px * px_mm, diameter_px * px_mm, reference_px * px_mm
-    log(f"scale: {px_mm:.3f} mm/pixel ({scale_source})")
+    log(f"scale: {px_mm / shrink:.3f} mm per video pixel ({scale_source})")
+    if np.median(reference_px) < 5:
+        warnings.append(f"The vessel is only about {np.median(reference_px):.0f} pixels wide at the resolution "
+                        "analysed. Stenosis estimates at this size are very rough.")
 
     lesions = find_lesions(s_mm, diameter_mm, reference_mm, calcified, resolution_mm=1.5 * px_mm)
-    thirds = SEGMENT_THIRDS.get(vessel, SEGMENT_THIRDS["RCA"])
+    vessel_source = "user" if vessel else "assumed (default; pass --vessel)"
+    vessel = vessel or "RCA"
+    thirds = SEGMENT_THIRDS[vessel]
     for lesion in lesions:
         lesion["segment"] = thirds[min(int(lesion["s_mm"] / s_mm[-1] * 3), 2)]
         lesion["bridged_gap"] = False
     for bridge in bridges:
         at = float(s_mm[cKDTree(path).query((bridge - origin) * actual_zoom)[1]])
-        hit = [l for l in lesions if l["start_mm"] - 3 <= at <= l["end_mm"] + 3]
-        for lesion in hit:
-            lesion["bridged_gap"] = True
+        for lesion in lesions:
+            if lesion["start_mm"] - 3 <= at <= lesion["end_mm"] + 3:
+                lesion["bridged_gap"] = True
         warnings.append(f"The trace was reconnected across a gap near {at:.0f} mm, where the lumen was too "
                         "narrow or too faint to follow. Confirm it is the same vessel.")
 
@@ -756,35 +878,49 @@ def run(video, ref_diameter_mm=3.0, pixel_mm=None, fov_mm=None, z_ratio=None, se
                         "reference calibre. Do not read the end of the trace as the end of the vessel: "
                         "an occlusion or a stretch without contrast looks the same.")
 
-    footprint = ndimage.binary_dilation(mask_iso, FULL, iterations=4) & ~thick_iso
-    calcium_mm3 = float(((vol_iso > calcium_level) & footprint).sum() * px_mm ** 3)
-    verts, faces = mesh_lps(mask_iso, origin * actual_zoom, px_mm, superior_to_inferior)
+    # Calcium: where along the vessel it was seen. An 8-bit video cannot
+    # support a volume or a score.
+    calcium_sites = []
+    if calcium_visible:
+        marked, count = ndimage.label(calcified)
+        calcium_sites = [round(float(s_mm[np.flatnonzero(marked == i)].mean()), 1) for i in range(1, count + 1)]
+
+    verts, faces = mesh_lps(tube_field(vol_iso.shape, path, diameter_px), origin * actual_zoom,
+                            px_mm, superior_to_inferior)
 
     every = max(1, len(s_mm) // 300)
     findings = {
         "schema": "cathvision.video2stl.findings/v1",
         "disclaimer": DISCLAIMER,
         "source": {"video": os.path.basename(video), "frames": int(total_frames),
-                   "slices_used": int(len(stack)), "image_box_xywh": [int(v) for v in box]},
+                   "frame_range": [int(kept[0]), int(kept[-1])] if frames else None,
+                   "slices_used": int(len(stack)),
+                   "image_box_xywh": [int(v) for v in box],
+                   "image_box_source": "user (--crop)" if crop else "detected",
+                   "analysed_at_fraction_of_size": f"1/{shrink}"},
         "assumptions": {
             "scale_source": scale_source,
             "reference_diameter_mm": None if pixel_mm else ref_diameter_mm,
-            "mm_per_pixel": round(px_mm, 4),
-            "z_ratio": round(float(z_ratio), 3),
+            "mm_per_pixel": round(px_mm / shrink, 4),
+            "z_ratio": round(float(z_ratio * shrink), 3),
             "z_ratio_source": z_source,
-            "z_ratio_confidence": round(z_confidence, 2),
             "sweep": "superior-to-inferior" if superior_to_inferior else "inferior-to-superior",
             "sweep_source": sweep_source,
-            "segment_assignment": "approximate thirds of the traced length",
+            "proximal_end": proximal_source,
+            "vessel_selection": "user (--seed)" if seed else "automatic (most tubular bright structure)",
+            "vessel_label_source": vessel_source,
+            "segment_assignment": "approximate thirds of the traced length; not anatomical landmarks",
             "plaque_model": "non-calcified plaque assumed to have soft-tissue density",
             "image_blur_sigma_px": fit_info["blur_sigma_px"],
+            "lesion_threshold_percent": LESION_MIN_PERCENT,
+            "ends_not_examined_mm": END_TRIM_MM,
+            "model": "tube of the measured lumen diameter along the traced centerline; branches are not shown",
         },
         "warnings": warnings,
         "vessel": vessel,
         "length_mm": round(float(s_mm[-1]), 1),
         "lesions": lesions,
-        "calcium": {"distinguishable": calcium_visible,
-                    "volume_mm3": round(calcium_mm3, 1) if calcium_visible else None},
+        "calcium": {"distinguishable": calcium_visible, "sites_mm": calcium_sites},
         "profile": {"s_mm": np.round(s_mm[::every], 2).tolist(),
                     "diameter_mm": np.round(diameter_mm[::every], 3).tolist(),
                     "reference_mm": np.round(reference_mm[::every], 3).tolist()},
@@ -810,14 +946,16 @@ def main(argv=None):
     ap.add_argument("-o", "--stl", help="output STL (default: <video>.stl)")
     ap.add_argument("--findings", help="write findings JSON for the CathVision report panel")
     ap.add_argument("--qa", help="write a straightened-vessel + diameter-profile PNG")
-    ap.add_argument("--vessel", default="RCA", choices=sorted(SEGMENT_THIRDS))
+    ap.add_argument("--vessel", choices=sorted(SEGMENT_THIRDS),
+                    help="which artery this is; it is not detected (default: labelled RCA, flagged as assumed)")
     scale = ap.add_argument_group("scale (a video has none; pick the best you know)")
     scale.add_argument("--pixel-mm", type=float, help="true pixel size of the CT image, if known")
-    scale.add_argument("--fov-mm", type=float, help="true width of the CT image region, if known")
+    scale.add_argument("--fov-mm", type=float,
+                       help="true width of the CT image region, if known (best given together with --crop)")
     scale.add_argument("--ref-diameter-mm", type=float, default=3.0,
                        help="otherwise: assumed healthy proximal lumen diameter (default 3.0)")
     scale.add_argument("--z-ratio", type=float,
-                       help="slice spacing / pixel size, if known (default: estimated from the vessel)")
+                       help="slice spacing / video pixel size, if known (default: estimated from the vessel)")
     ap.add_argument("--seed", type=lambda t: parse_ints(t, 3, "--seed"), metavar="X,Y,FRAME",
                     help="a point inside the vessel, in video pixel/frame coordinates (default: auto)")
     ap.add_argument("--crop", type=lambda t: parse_ints(t, 4, "--crop"), metavar="X,Y,W,H",
@@ -849,15 +987,21 @@ def main(argv=None):
         write_qa_image(args.qa, result["qa"]["strip"], result["qa"]["s_mm"],
                        result["qa"]["diameter_mm"], result["qa"]["reference_mm"], findings["lesions"])
         print(f"wrote {args.qa}")
+    a = findings["assumptions"]
+    print(f"  labelled {findings['vessel']} ({a['vessel_label_source']}); proximal end: {a['proximal_end']}; "
+          f"sweep: {a['sweep']} ({a['sweep_source']})")
     for lesion in findings["lesions"]:
         if lesion["unresolved"]:
-            print(f"  lesion at {lesion['s_mm']} mm: lumen not resolved (severe stenosis or occlusion)")
+            print(f"  lesion at {lesion['s_mm']} mm: lumen too narrow for the video to resolve "
+                  f"(at least {lesion['percent_at_least']}% narrowed; no upper bound)")
         else:
             print(f"  lesion at {lesion['s_mm']} mm: {lesion['min_diameter_mm']} vs "
                   f"{lesion['reference_diameter_mm']} mm = {lesion['percent_stenosis']}% "
                   f"({lesion['grade']}){', calcified' if lesion['calcified'] else ''}")
     if not findings["lesions"]:
-        print("  no stenosis >= 15% detected")
+        print(f"  no stenosis >= {LESION_MIN_PERCENT:.0f}% found (the first and last {END_TRIM_MM:.0f} mm are not examined)")
+    if findings["calcium"]["sites_mm"]:
+        print(f"  calcium seen near {', '.join(f'{v:.0f}' for v in findings['calcium']['sites_mm'])} mm")
     for warning in findings["warnings"]:
         print(f"WARNING: {warning}")
     print(f"NOTE: {DISCLAIMER}")

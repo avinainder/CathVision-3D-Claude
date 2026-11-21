@@ -135,6 +135,9 @@ function SegmentEditor({
   const pinned = !!report.pins[segment.id];
   const suggestion = finding.suggestion;
   const suggestedGrade = suggestion && STENOSIS_GRADES.find((g) => g.id === suggestion.grade);
+  // The video could not size this lumen: there is nothing to grade, so the
+  // honest thing to offer is "non-diagnostic".
+  const unresolved = suggestion && (suggestion.unresolved || !suggestedGrade);
 
   return (
     <div className="segment-editor">
@@ -148,17 +151,25 @@ function SegmentEditor({
         <div className="suggestion">
           <div>
             <strong>Video estimate, unverified:</strong>{' '}
-            {suggestion.unresolved
-              ? 'lumen not resolved — severe stenosis or occlusion'
+            {unresolved
+              ? `lumen too narrow for the video to resolve${suggestion.percentAtLeast != null
+                ? ` (narrowed by at least ${suggestion.percentAtLeast}%)` : ''}; anything up to an occlusion is possible`
               : `${suggestedGrade.label}${suggestion.percent != null ? ` (about ${suggestion.percent}%)` : ''}`}
             {suggestion.positionMm != null ? `, ${Math.round(suggestion.positionMm)} mm along the traced vessel` : ''}
             {suggestion.calcified ? ', calcium nearby' : ''}. Check against the source CCTA.
           </div>
           <div className="suggestion__actions">
-            <button type="button" className="chip chip--on"
-              onClick={() => onFinding(segment.id, { grade: suggestion.grade, nondiagnostic: false, suggestion: null })}>
-              Use {suggestedGrade.label}
-            </button>
+            {unresolved ? (
+              <button type="button" className="chip chip--on"
+                onClick={() => onFinding(segment.id, { grade: '0', nondiagnostic: true, suggestion: null })}>
+                Mark non-diagnostic
+              </button>
+            ) : (
+              <button type="button" className="chip chip--on"
+                onClick={() => onFinding(segment.id, { grade: suggestion.grade, nondiagnostic: false, suggestion: null })}>
+                Use {suggestedGrade.label}
+              </button>
+            )}
             <button type="button" className="chip" onClick={() => onFinding(segment.id, { suggestion: null })}>
               Discard
             </button>

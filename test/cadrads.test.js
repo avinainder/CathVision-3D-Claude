@@ -168,16 +168,32 @@ test('video findings become suggestions, keeping the worst lesion per segment', 
     lesions: [
       { segment: 'pRCA', grade: '25-49', percent_stenosis: 29, s_mm: 36.4, calcified: true, unresolved: false },
       { segment: 'pRCA', grade: '1-24', percent_stenosis: 18, s_mm: 12, calcified: false, unresolved: false },
-      { segment: 'mRCA', grade: '70-99', percent_stenosis: null, s_mm: 61, calcified: false, unresolved: true },
+      { segment: 'mRCA', grade: '70-99', percent_stenosis: 72, s_mm: 55, calcified: false, unresolved: false },
+      { segment: 'mRCA', grade: null, percent_stenosis: null, percent_at_least: 40, s_mm: 61, unresolved: true },
       { segment: 'nonsense', grade: '70-99', percent_stenosis: 80, s_mm: 5 },
     ],
   });
   assert.deepEqual(Object.keys(suggestions).sort(), ['mRCA', 'pRCA']);
   assert.equal(suggestions.pRCA.percent, 29);
-  assert.equal(suggestions.mRCA.percent, null);
+  // An unresolved lumen has no grade, only a lower bound, and outranks a graded lesion.
   assert.ok(suggestions.mRCA.unresolved);
+  assert.equal(suggestions.mRCA.grade, null);
+  assert.equal(suggestions.mRCA.percent, null);
+  assert.equal(suggestions.mRCA.percentAtLeast, 40);
   assert.deepEqual(warnings, ['trace reconnected']);
   assert.throws(() => suggestionsFromVideoFindings({ schema: 'something else' }));
+});
+
+test('an unresolved suggestion survives storage with no grade', () => {
+  const stored = sanitizeReport({
+    version: 1,
+    dominance: 'right',
+    segments: { mRCA: { grade: '0', suggestion: { unresolved: true, grade: null, percentAtLeast: 40, positionMm: 61 } } },
+  });
+  assert.deepEqual(stored.segments.mRCA.suggestion, {
+    source: 'video2stl', grade: null, percent: null, percentAtLeast: 40, positionMm: 61, calcified: false, unresolved: true,
+  });
+  assert.equal(classify(stored).label, 'CAD-RADS 0');
 });
 
 test('a suggestion never changes the classification until it is accepted', () => {

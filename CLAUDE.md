@@ -66,7 +66,7 @@
 
 ## Tests
 - `npm test` — node tests in `test/` (angles round trip, STL orientation, CAD-RADS rules)
-- `python -m unittest discover -s tools/video2stl -p "test_*.py"` — pipeline vs. phantom (~90 s; needs
+- `python -m unittest discover -s tools/video2stl -p "test_*.py"` — pipeline vs. phantoms (~3 min; needs
   ffmpeg and `tools/video2stl/requirements.txt`)
 - `node scripts/e2e-report.mjs --stl … --findings …` — drives a running build in Chromium on desktop
   and phone (touch) viewports; needs Playwright. Run it after touching Viewport, App or the report panel.

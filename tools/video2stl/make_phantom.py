@@ -169,11 +169,12 @@ def build(seed=7, lesions=None, blur_mm=0.3, plaque_level=PLAQUE):
 def write_video(vol8, path, crf=26, repeat=1, margin=(24, 40, 32, 32)):
     """Letterbox each slice with a static caption bar, like a screen capture."""
     top, bottom, left, right = margin
-    h, w = NY + top + bottom, NX + left + right
+    ny, nx = vol8.shape[1:]
+    h, w = ny + top + bottom, nx + left + right
     h += h % 2
     w += w % 2
     frames = np.zeros((vol8.shape[0], h, w), np.uint8)
-    frames[:, top:top + NY, left:left + NX] = vol8
+    frames[:, top:top + ny, left:left + nx] = vol8
     frames[:, 6:14, left:left + 90] = 235  # static caption block
     if repeat > 1:
         frames = np.repeat(frames, repeat, axis=0)
@@ -181,7 +182,7 @@ def write_video(vol8, path, crf=26, repeat=1, margin=(24, 40, 32, 32)):
            "-s", f"{w}x{h}", "-r", "30", "-i", "-", "-c:v", "libx264",
            "-crf", str(crf), "-pix_fmt", "yuv420p", path]
     subprocess.run(cmd, input=frames.tobytes(), check=True)
-    return {"frame_size": [w, h], "image_box": [left, top, NX, NY], "repeat": repeat}
+    return {"frame_size": [w, h], "image_box": [left, top, nx, ny], "repeat": repeat}
 
 
 def main():

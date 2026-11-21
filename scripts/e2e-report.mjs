@@ -11,7 +11,8 @@
  * of the app, so it is resolved from the project or from the global install.
  */
 import { execSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -188,6 +189,21 @@ async function run(profile, context, touch) {
   check(profile, 'structured report lists the findings',
     text.includes('Mid RCA: 50–69% (moderate) stenosis.') && text.includes('Proximal RCA:') && text.includes('CAD-RADS 3/P1'));
   await shot('4-report');
+
+  // A lumen the video could not resolve is offered as non-diagnostic, never as a grade.
+  const unresolved = path.join(mkdtempSync(path.join(tmpdir(), 'cathvision-e2e-')), 'unresolved.json');
+  writeFileSync(unresolved, JSON.stringify({
+    schema: 'cathvision.video2stl.findings/v1',
+    warnings: [],
+    lesions: [{ segment: 'dRCA', grade: null, unresolved: true, percent_stenosis: null, percent_at_least: 40, s_mm: 95 }],
+  }));
+  await page.setInputFiles('.report-panel input[type=file]', unresolved);
+  await page.locator('.report-tab', { hasText: 'Map' }).click();
+  await page.waitForSelector('.suggestion');
+  const offer = await page.locator('.suggestion').textContent();
+  await page.locator('.suggestion .chip', { hasText: 'Mark non-diagnostic' }).click();
+  check(profile, 'an unresolved video lesion is offered as non-diagnostic',
+    offer.includes('at least 40%') && (await badge()) === 'CAD-RADS 3/P1/N', `${await badge()}`);
   await page.locator('.report-panel__close').click();
 
   // Measure: millimetres, marked as approximate on an estimated model.
@@ -209,7 +225,7 @@ async function run(profile, context, touch) {
   await page.waitForFunction(() => document.querySelector('.debug-readout')?.textContent.includes('SPACE='));
   await page.click('[aria-label="CAD-RADS report"]');
   check(profile, 'report and pin are restored after a reload',
-    (await badge()) === 'CAD-RADS 3/P1' && (await page.locator('.coronary-map').textContent()).includes('◆ mRCA'), await badge());
+    (await badge()) === 'CAD-RADS 3/P1/N' && (await page.locator('.coronary-map').textContent()).includes('◆ mRCA'), await badge());
   await page.waitForTimeout(900);
   await shot('5-restored');
 

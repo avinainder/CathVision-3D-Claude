@@ -349,20 +349,25 @@ export function suggestionsFromVideoFindings(findings) {
   if (findings?.schema !== 'cathvision.video2stl.findings/v1') {
     throw new Error('Not a video2stl findings file');
   }
+  // A lumen the video could not resolve has no grade, only a lower bound;
+  // it outranks any graded lesion in the same segment, since it may be worse.
+  const weight = (s) => (s.unresolved ? Infinity : GRADE_RANK[s.grade]);
   const suggestions = {};
   for (const lesion of Array.isArray(findings.lesions) ? findings.lesions : []) {
-    if (!lesion || typeof lesion !== 'object') continue;
-    if (!SEGMENT_BY_ID[lesion.segment] || GRADE_RANK[lesion.grade] === undefined) continue;
-    const current = suggestions[lesion.segment];
-    if (current && GRADE_RANK[current.grade] >= GRADE_RANK[lesion.grade]) continue;
-    suggestions[lesion.segment] = {
+    if (!lesion || typeof lesion !== 'object' || !SEGMENT_BY_ID[lesion.segment]) continue;
+    const unresolved = lesion.unresolved === true;
+    if (!unresolved && GRADE_RANK[lesion.grade] === undefined) continue;
+    const suggestion = {
       source: 'video2stl',
-      grade: lesion.grade,
-      percent: !lesion.unresolved && isNumber(lesion.percent_stenosis) ? lesion.percent_stenosis : null,
+      grade: unresolved ? null : lesion.grade,
+      percent: !unresolved && isNumber(lesion.percent_stenosis) ? lesion.percent_stenosis : null,
+      percentAtLeast: unresolved && isNumber(lesion.percent_at_least) ? lesion.percent_at_least : null,
       positionMm: isNumber(lesion.s_mm) ? lesion.s_mm : null,
       calcified: !!lesion.calcified,
-      unresolved: !!lesion.unresolved,
+      unresolved,
     };
+    const current = suggestions[lesion.segment];
+    if (!current || weight(suggestion) > weight(current)) suggestions[lesion.segment] = suggestion;
   }
   const warnings = Array.isArray(findings.warnings) ? findings.warnings.filter((w) => typeof w === 'string') : [];
   return { suggestions, warnings };
@@ -401,14 +406,16 @@ export function sanitizeReport(value) {
         if (raw.hrp?.[feature.id] === true) finding.hrp[feature.id] = true;
       }
       const s = raw.suggestion;
-      if (s && typeof s === 'object' && GRADE_RANK[s.grade] !== undefined) {
+      const unresolved = s?.unresolved === true;
+      if (s && typeof s === 'object' && (unresolved || GRADE_RANK[s.grade] !== undefined)) {
         finding.suggestion = {
           source: 'video2stl',
-          grade: s.grade,
-          percent: isNumber(s.percent) ? s.percent : null,
+          grade: unresolved ? null : s.grade,
+          percent: !unresolved && isNumber(s.percent) ? s.percent : null,
+          percentAtLeast: unresolved && isNumber(s.percentAtLeast) ? s.percentAtLeast : null,
           positionMm: isNumber(s.positionMm) ? s.positionMm : null,
           calcified: s.calcified === true,
-          unresolved: s.unresolved === true,
+          unresolved,
         };
       }
       report.segments[segment.id] = finding;
